@@ -308,7 +308,7 @@ def inference(model, path_input_image, result_path, clean_result=False, ui=None)
     if clean_result:
         if not ui is None:
             ui['button_run']["text"] = "Post-processing..."
-        inference = tile_cleaner(inference, 500, 16, 255)
+        inference = tile_cleaner(inference, 500, 16, 2)
     
     # saving final result
     with r.Env():

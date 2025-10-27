@@ -1,13 +1,23 @@
-# SAR Image pre-processing
+# Flood Inference Tool
+
+- Bruno Menini Matosak
+
+Tool created to use apply models to create water masks using Sentinel-1 images.
+
+## SAR Image pre-processing
 
 The images used by the tool to create flood maps are Sentinel-1 Ground Range Detected (GRD). This images must first go through some pre-processing steps using SNAP before being able to be used.
 
-The options 
+The `.zip` file can be opened directly in SNAP, and then the entire scene can be reduced to an AOI using the `Raster`>`Subset...` option. After that, there are three steps that must be followed.
+
+ 1. `Radar` > `Radiometric` > `S-1 Thermal Noise Removal`
+ 2. `Radar` > `Radioemtric` > `Calibrate`
+ 3. `Radar` > `Geometric` > `Terrain Correction` > `Range-Doppler Terrain Correction` (Remember to change 'Save as:' to 'GeoTIFF-BigTIFF')
 
 > [!WARNING]
 > The image used must contain the first the VH band, then the VV band, in this specific order. The values must also be linear value, and **NOT** in dB.
 
-# Installation
+## Installation
 
 To use this tool, first we need to save it locally either using `git clone` or downloading the files as zip and decompressing it on our machine. They can be saved anywhere.
 
@@ -41,7 +51,7 @@ pip install -r requirements.txt
 
 After that, if run without any errors, the computer should be able to run the tool without any problems.
 
-# Usage
+## Utilization
 
 To use the tool, first we have to open the terminal (or Anaconda Prompt) and navigate to the folder where we saved the repository (where `inference.py` is located).
 
