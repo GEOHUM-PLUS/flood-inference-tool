@@ -357,7 +357,7 @@ def start_processing(input_image_path, output_path, post_processing=False, windo
         DEVICE = device
     print('Device:', DEVICE)
     model = SimpleUNet().to(DEVICE)
-    data = torch.load('model-0218.pt', map_location=torch.device(DEVICE), weights_only=True)
+    data = torch.load('models/model-0218.pt', map_location=torch.device(DEVICE), weights_only=True)
     model.load_state_dict(data['model_state_dict'])
     Thread(
         target=inference, 
@@ -374,7 +374,7 @@ def build_ui():
     window = tk.Tk()
     window.title('GEOHUM Flood Mapper')
 
-    img = Image.open('gEOhum_Logo_NEWCD-Web.png')
+    img = Image.open('figures/gEOhum_Logo_NEWCD-Web.png')
     img = ImageTk.PhotoImage(img)
     panel = tk.Label(window, image=img)
     panel.image = img
@@ -387,7 +387,7 @@ def build_ui():
     frame_input_1 = tk.Frame(window)
     frame_input_2 = tk.Frame(window)
     input_label = tk.Label(text='Input file:', master=frame_input_1).pack(side=tk.LEFT)
-    # img = Image.open('Question_mark.png').resize((15,15))
+    # img = Image.open('figures/Question_mark.png').resize((15,15))
     # img = ImageTk.PhotoImage(img)
     # qm = tk.Label(frame_input_1, image=img)
     # qm.image = img
