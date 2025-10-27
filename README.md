@@ -57,7 +57,7 @@ python inference.py -ui
 
 After that, a new window should open like the following:
 
-![alt text](figures/image.png)
+![alt text](figures/ui.png)
 
 To use it in terminal-mode, without a user interface, you can use other options instead of `-ui`. The following options can be used:
 
