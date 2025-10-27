@@ -1,3 +1,5 @@
+import rioxarray
+from rioxarray.merge import merge_arrays
 import tkinter as tk
 from tkinter import filedialog, ttk
 import torch
@@ -14,8 +16,6 @@ import pystac_client
 import planetary_computer
 import geopandas
 from shapely import Polygon
-import rioxarray
-from rioxarray.merge import merge_arrays
 import subprocess
 from skimage.morphology import area_opening, area_closing
 import warnings
@@ -260,9 +260,12 @@ def inference(model, path_input_image, result_path, clean_result=False, ui=None)
 
             if np.sum(vv[i:i+256, j:j+256])!=0:
                 batch.append((i,j))
-                if len(batch)>=batch_size or (i==dataset_sar.height-256 and j==dataset_sar.width-256):
+                if len(batch)>=batch_size:
                     starting_coordinates_batches.append(batch)
                     batch = []
+    
+    if batch:
+        starting_coordinates_batches.append(batch)
 
     batch_count = 0
     for batch in tqdm(starting_coordinates_batches):
@@ -299,7 +302,7 @@ def inference(model, path_input_image, result_path, clean_result=False, ui=None)
             # ui['window'].update_idletasks()
     
     # final correction
-    inference[vv==0] = 255
+    inference[vv==0] = 2
 
     # clean if necessary
     if clean_result:
@@ -313,7 +316,7 @@ def inference(model, path_input_image, result_path, clean_result=False, ui=None)
         profile.update(
             dtype=r.uint8,
             count=1,
-            nodata=255,
+            nodata=2,
             compress='lzw')
 
         with r.open(result_path, 'w', **profile) as dst:
@@ -447,11 +450,11 @@ def show_error(message):
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-ui', '--ui-mode', action='store_true')
-    parser.add_argument('-i', '--input_path', type=str)
-    parser.add_argument('-o', '--output-path', type=str)
-    parser.add_argument('-pp', '--post-processing', action='store_true')
-    parser.add_argument('-d', '--device', default='cpu', type=str)
+    parser.add_argument('-ui', '--ui-mode', action='store_true', help='Activate UI mode. Ignores all other options given.')
+    parser.add_argument('-i', '--input_path', type=str, help='The path to the input image containing VH and VV bands (in this order).')
+    parser.add_argument('-o', '--output-path', type=str, help='The path to the final result.')
+    parser.add_argument('-pp', '--post-processing', action='store_true', help='Wheter or not to apply postprocessing and reduce noise in the results.')
+    parser.add_argument('-d', '--device', default='cpu', type=str, help='The device used to run the inference. Example values are "cpu", "cuda", and "mps".')
 
     args = parser.parse_args()
 
