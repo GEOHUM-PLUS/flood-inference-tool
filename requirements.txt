@@ -8,6 +8,5 @@ planetary_computer
 geopandas
 shapely
 rioxarray
-rioxarray
 scikit-image
 pillow
