@@ -11,7 +11,7 @@ The images used by the tool to create flood maps are Sentinel-1 Ground Range Det
 The `.zip` file can be opened directly in SNAP, and then the entire scene can be reduced to an AOI using the `Raster`>`Subset...` option. After that, there are three steps that must be followed.
 
  1. `Radar` > `Radiometric` > `S-1 Thermal Noise Removal`
- 2. `Radar` > `Radioemtric` > `Calibrate`
+ 2. `Radar` > `Radiometric` > `Calibrate`
  3. `Radar` > `Geometric` > `Terrain Correction` > `Range-Doppler Terrain Correction` (Remember to change 'Save as:' to 'GeoTIFF-BigTIFF')
 
 > [!WARNING]
