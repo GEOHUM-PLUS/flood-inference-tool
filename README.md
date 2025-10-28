@@ -23,30 +23,22 @@ To use this tool, first we need to save it locally either using `git clone` or d
 
 Then we need to create a virtual environemt using [Anaconda or Miniconda](https://www.anaconda.com/download/success). I recommend using Miniconda, but if you have anaconda already installed that is more than enough. 
 
-Then, we open any terminal that we can use the command `conda` in it, such as the Anaconda Prompt on Windows. Then we will move to the directory that you saved the contents of the repository (the folder that contains the file `inference.py`).
+We open any terminal that we can use the command `conda` in it, such as the Anaconda Prompt on Windows. Then we will move to the directory that you saved the contents of the repository (the folder that contains the file `inference.py`).
 
 ```
 cd path/to/directory
 ```
 
-We then use the following command to create an environment called ```flood_tool``` and install python and GDAL on it.
+We then use the following command to create an environment called ```flood_tool``` and install the required pacakges:
 
 ```
-conda create -n flood_tool -c conda-forge python=3.12 gdal -y
+conda env create -f environment.yml
 ```
 
-After we created the `flood_tool` virtual environment, we need to activate it by using the following command:
+To activate the newly created environment, we can do:
 
 ```
 conda activate flood_tool
-```
-
-After this, `(flood_tool)` should appear in your terminal before every input line.
-
-At this point, we have to install the necessary requirements by using the following command:
-
-```
-pip install -r requirements.txt
 ```
 
 After that, if run without any errors, the computer should be able to run the tool without any problems.
