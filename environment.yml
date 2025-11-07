@@ -3,17 +3,17 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
+  - python=3.12
   - gdal
   - pip:
-      - distance-map==1.0.1
-      - geopandas==1.1.1
-      - pillow==12.0.0
-      - planetary-computer==1.0.0
-      - pystac-client==0.9.0
-      - rasterio==1.4.3
-      - rioxarray==0.20.0
-      - scikit-image==0.25.2
-      - shapely==2.1.2
-      - torch==2.9.0
-      - tqdm==4.67.1
+      - distance-map
+      - geopandas
+      - pillow
+      - planetary-computer
+      - pystac-client
+      - rasterio
+      - rioxarray
+      - scikit-image
+      - shapely
+      - torch
+      - tqdm
