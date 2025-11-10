@@ -24,7 +24,7 @@ print(DEVICE)
 class SenForFlood_distance_maps(torch.utils.data.Dataset):
     def __init__(self, events=None, chip_size=256, number_of_points_map=100, number_of_points_loss=500):
         super().__init__()
-        data_to_include = ['s1_during_flood', 'terrain', 'SatCLIP_embedding', 'flood_mask_v1.1']
+        data_to_include = ['s1_during_flood', 'terrain', 'SatCLIP_embedding']
         self.senforflood = SenForFlood(
             dataset_folder='/media/bruno/Matosak/SenForFlood',
             chip_size=chip_size,
@@ -42,7 +42,7 @@ class SenForFlood_distance_maps(torch.utils.data.Dataset):
     
     def __getitem__(self, index):
         # getting EO data
-        s1df, t, emb, fm = self.senforflood[index]
+        s1df, t, emb = self.senforflood[index]
 
         # generating the rest
         cf, cn, dmap = get_points_and_distance_map(
@@ -51,11 +51,6 @@ class SenForFlood_distance_maps(torch.utils.data.Dataset):
             max_points_per_class_loss=self.number_of_points_loss
         )
         dmap = torch.Tensor(np.array(dmap))
-
-        cf, cn = get_points_loss(
-            s1df, t, fm, p=0.3,
-            max_points_per_class_loss=self.number_of_points_loss
-        )
 
         samples_ind = [
             np.concatenate([cf[0], cn[0]]),
