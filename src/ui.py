@@ -10,6 +10,9 @@ from src.inference import start_processing
 def build_ui():
     window = tk.Tk()
     window.title('GEOHUM Flood Mapper')
+    ico = Image.open('figures/icon.ico')
+    photo = ImageTk.PhotoImage(ico)
+    window.wm_iconphoto(False, photo)
 
     img = Image.open('figures/gEOhum_Logo_NEWCD-Web.png')
     img = ImageTk.PhotoImage(img)
