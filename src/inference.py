@@ -1,45 +1,31 @@
 import os
-import pickle
-import argparse
-import rioxarray
-from rioxarray.merge import merge_arrays
 import torch
 import torch.nn as nn
-import rasterio as r
-from rasterio.crs import CRS
-from rasterio import warp
 import numpy as np
 from tqdm import tqdm
 from threading import Thread
-import pystac_client
-import planetary_computer
-import geopandas
-from shapely import Polygon
-import subprocess
 from skimage.morphology import area_opening, area_closing
 import warnings
+import rasterio as r
 
-from src.helpers import get_points_and_distance_map
-from src.models import SimpleUNet
+from src.models import UNetSemanticSegmentation
+from src.helpers import DataScaler
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-
-def inference(model_path, path_input_image, result_path, clean_result=False, ui=None):
+def inference(model_path, path_input_image, result_path, clean_result=False, ui=None, device=torch.device('cpu'), sar_is_dB:bool=False):
     # check if it's running the ui or terminal version
     if not ui is None:
         ui['progress_bar']['value'] = 0
     
     # innitially load the model weights
-    data = torch.load(model_path, map_location=torch.device(DEVICE), weights_only=True)
+    data = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
 
     # load model for inference
-    match data['model_name']:
-        case 'UNet':
-            model = SimpleUNet().to(DEVICE)
-        case 'SimpleUNetEmb':
-            model = SimpleUNetEmb(4,2,data['chip_size']).to(DEVICE)
+    match model_path:
+        case 'models/UNet.pt':
+            model = UNetSemanticSegmentation(in_channels=2, out_channels=3, base=32).to(device)
         case _:
-            raise ValueError(f'{data["model_name"]} is not a valid model name.')
+            raise ValueError(f'{model_path} is not a valid model name.')
+    
     model.load_state_dict(data['model_state_dict'])
     model.eval()
 
@@ -50,11 +36,11 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
     dataset_sar = r.open(path_input_image)
     vv = dataset_sar.read(2)
     vh = dataset_sar.read(1)
-    if not ui is None:
-        ui['button_run']["text"] = "Downloading DEM..."
+    # if not ui is None:
+    #     ui['button_run']["text"] = "Downloading DEM..."
 
     # get slope
-    slope = get_slope(path_input_image)
+    # slope = get_slope(path_input_image)
 
     # define placeholder for final result
     inference = np.zeros([dataset_sar.height, dataset_sar.width])+255
@@ -82,50 +68,39 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
     if batch:
         starting_coordinates_batches.append(batch)
 
-    # get the embeddings, if necessary
-    if data['use_emb']:
-        if not ui is None:
-            ui['button_run']["text"] = "Getting SatCLIP embeddings..."
-        embeddings = get_embeddings(
-            starting_coordinates=starting_coordinates_batches, 
-            ref_dataset=dataset_sar, 
-            chip_size=data['chip_size']
-        )
-
     # Do the inference!
-    print('Doing inference... (finally!)')
     if not ui is None:
         ui['button_run']["text"] = "Doing the inference..."
     batch_count = 0
     
-    print('TODO: Implement option to use linear or dB units')
-    for batch in tqdm(starting_coordinates_batches, ncols=70):
+    for batch in tqdm(starting_coordinates_batches, desc='Inference:'):
         batch_s1 = []
-        batch_t = []
-        batch_d = []
         for i,j in batch:
-            if False: #data in linear units
-                s1 = data_scaler.scale_data('s1_during_flood', np.stack([10*np.log10(vv[i:i+data['chip_size'], j:j+data['chip_size']]), 10*np.log10(vh[i:i+data['chip_size'], j:j+data['chip_size']])]))
-            else: # data in dB
-                s1 = data_scaler.scale_data('s1_during_flood', np.stack([vv[i:i+data['chip_size'], j:j+data['chip_size']], vh[i:i+data['chip_size'], j:j+data['chip_size']]]))
-            t = data_scaler.scale_data('terrain', np.stack([np.zeros([data['chip_size'],data['chip_size']]), slope[i:i+data['chip_size'], j:j+data['chip_size']]]))
-            coords_f, coords_n, dmap = get_points_and_distance_map(s1, t, max_points_per_class_map=100)
-            batch_d.append(dmap)
+            if sar_is_dB: # data in dB
+                s1 = data_scaler.normalize_data(
+                    's1_during_flood', 
+                    np.stack([
+                        vv[i:i+data['chip_size'], j:j+data['chip_size']], 
+                        vh[i:i+data['chip_size'], j:j+data['chip_size']]
+                    ])
+                )
+            else: # data is linear
+                s1 = data_scaler.normalize_data(
+                    's1_during_flood', 
+                    np.stack([
+                        10*np.log10(vv[i:i+data['chip_size'], j:j+data['chip_size']]), 
+                        10*np.log10(vh[i:i+data['chip_size'], j:j+data['chip_size']])
+                    ])
+                )
             batch_s1.append(s1)
-            batch_t.append(t[1])
         
         batch_s1 = np.array(batch_s1)
         batch_s1[np.isnan(batch_s1)] = 0
-        batch_t = np.array(batch_t)[:,None,:,:]
-        batch_d = np.array(batch_d)
         
-        batch_data = torch.Tensor(np.concatenate([batch_s1, batch_t, batch_d], axis=1)).to(DEVICE)
+        batch_data = torch.Tensor(np.asarray(batch_s1, dtype=np.float32)).to(device)
 
         with torch.no_grad():
-            if data['use_emb']:
-                tiles_pred = torch.argmax(model(batch_data, torch.Tensor(embeddings[batch_count]).to(torch.float32).to(DEVICE)).detach().cpu(), axis=1)
-            else:
-                tiles_pred = torch.argmax(model(batch_data).detach().cpu(), axis=1)
+            tiles_pred = torch.argmax(model(batch_data).detach().cpu(), axis=1)
             index = 0
             for i,j in batch:
                 inference[i:i+data['chip_size'], j:j+data['chip_size']] = tiles_pred[index].numpy()
@@ -136,7 +111,7 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
             ui['progress_bar']['value'] = 100*batch_count/len(starting_coordinates_batches)
     
     # final correction
-    inference[vv==0] = 2
+    inference[vv==0] = 0
 
     # clean if necessary
     if clean_result:
@@ -151,7 +126,7 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
         profile.update(
             dtype=r.uint8,
             count=1,
-            nodata=2,
+            nodata=0,
             compress='lzw')
 
         with r.open(result_path, 'w', **profile) as dst:
@@ -163,7 +138,7 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
 
 # TODO: Check if inputs are valid
 # TODO: Disable everything in the UI
-def start_processing(model_name, input_image_path, output_path, post_processing=False, window=None, pb=None, device=None, bt_run=None):
+def start_processing(model_name, input_image_path, output_path, post_processing=False, window=None, pb=None, device=None, bt_run=None, sar_is_dB:bool=False):
     if not input_image_path:
         show_error('Please insert an input path!')
         return
@@ -176,10 +151,8 @@ def start_processing(model_name, input_image_path, output_path, post_processing=
     if not window is None:
         bt_run["state"] = "disabled"
         bt_run["text"] = "Loading data..."
-        global DEVICE
-        DEVICE = device
 
-    print('Device:', DEVICE)
+    print('Device:', device)
 
     Thread(
         target=inference,
@@ -188,6 +161,8 @@ def start_processing(model_name, input_image_path, output_path, post_processing=
             input_image_path, 
             output_path, 
             post_processing, 
-            None if window is None else {'window': window, 'progress_bar': pb, 'button_run': bt_run}
+            None if window is None else {'window': window, 'progress_bar': pb, 'button_run': bt_run},
+            device,
+            sar_is_dB
         )
     ).start()

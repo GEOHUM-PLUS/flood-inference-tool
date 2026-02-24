@@ -15,6 +15,7 @@ if __name__=='__main__':
     parser.add_argument('-pp', '--post-processing', action='store_true', help='Wheter or not to apply postprocessing and reduce noise in the results.')
     parser.add_argument('-d', '--device', default='cpu', type=str, help='The device used to run the inference. Example values are "cpu", "cuda", and "mps".')
     parser.add_argument('-m', '--model', type=str, help='Model to use for the prediction.')
+    parser.add_argument('-dB', action='store_true', help='Wether the SAR data is in dB.')
 
     args = parser.parse_args()
 
@@ -33,4 +34,4 @@ if __name__=='__main__':
         except:
             warnings.warn(f'Device "{args.device}" not available, defaulting to "cpu".')
             DEVICE = 'cpu'
-        start_processing(args.model, args.input_path, args.output_path, post_processing=args.post_processing)
+        start_processing(args.model, args.input_path, args.output_path, post_processing=args.post_processing, device=DEVICE, sar_is_dB=args.dB)

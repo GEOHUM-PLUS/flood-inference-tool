@@ -2,6 +2,10 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from PIL import Image, ImageTk
 import torch
+import glob
+import os
+
+from src.inference import start_processing
 
 def build_ui():
     window = tk.Tk()
@@ -29,6 +33,13 @@ def build_ui():
     frame_input_1.pack(fill=tk.X, pady=(10, 0))
     frame_input_2.pack(fill=tk.X)
 
+    # checkbox is dB
+    frame = tk.Frame(window)
+    sar_is_dB = tk.BooleanVar(window, value=False)
+    checkbox_dB = tk.Checkbutton(master=frame, text='SAR data is in dB', variable=sar_is_dB)
+    checkbox_dB.pack(side=tk.LEFT)
+    frame.pack(fill=tk.X)
+
     # output
     frame_1 = tk.Frame(window)
     frame_2 = tk.Frame(window)
@@ -40,6 +51,14 @@ def build_ui():
 
     frame_1.pack(fill=tk.X)
     frame_2.pack(fill=tk.X)
+
+    # model options
+    frame = tk.Frame(window)
+    model_label = tk.Label(text='Model: ', master=frame).pack(side=tk.LEFT)
+    var_model = tk.StringVar(window, value='---')
+    models = [os.path.basename(file) for file in glob.glob('models/*')]
+    model_menu = tk.OptionMenu(frame, var_model, *models).pack(side=tk.LEFT)
+    frame.pack(fill=tk.X)
 
     # device options
     frame = tk.Frame(window)
@@ -62,16 +81,17 @@ def build_ui():
 
     # run button
     button_run = tk.Button(
-        text = 'Start Processing', 
+        text = 'Start Processing',
         command = lambda:start_processing(
-            model_name='model_SimpleUNet.pt', 
+            model_name=var_model.get(), 
             input_image_path=input_path.get(), 
             output_path=output_path.get(), 
             post_processing=use_postprocess.get(), 
             window=window, 
             pb=progressbar, 
-            device=var_device.get(), 
-            bt_run=button_run
+            device=var_device.get(),
+            bt_run=button_run,
+            sar_is_dB=sar_is_dB.get()
         )
     )
     button_run.pack()
