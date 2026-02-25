@@ -9,9 +9,9 @@ import warnings
 import rasterio as r
 
 from src.models import UNetSemanticSegmentation
-from src.helpers import DataScaler
+from src.helpers import DataScaler, get_slope, get_points_and_distance_map, tile_cleaner
 
-def inference(model_path, path_input_image, result_path, clean_result=False, ui=None, device=torch.device('cpu'), sar_is_dB:bool=False):
+def inference(model_path, path_input_image, result_path, clean_result=False, ui=None, device=torch.device('cpu'), sar_is_dB:bool=False, bayesian_dropout:bool=False):
     # check if it's running the ui or terminal version
     if not ui is None:
         ui['progress_bar']['value'] = 0
@@ -23,11 +23,19 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
     match model_path:
         case 'models/UNet.pt':
             model = UNetSemanticSegmentation(in_channels=2, out_channels=3, base=32).to(device)
+        case 'models/DistanceMap.pt':
+            model = UNetSemanticSegmentation(in_channels=4, out_channels=2, base=32).to(device)
         case _:
             raise ValueError(f'{model_path} is not a valid model name.')
     
     model.load_state_dict(data['model_state_dict'])
     model.eval()
+
+    # activating dropouts if Bayesian dropout option was given
+    if bayesian_dropout:
+        for m in model.modules():
+            if m.__class__.__name__.startswith('Dropout'):
+                m.train()
 
     # load data scaler
     data_scaler = DataScaler()
@@ -36,11 +44,12 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
     dataset_sar = r.open(path_input_image)
     vv = dataset_sar.read(2)
     vh = dataset_sar.read(1)
-    # if not ui is None:
-    #     ui['button_run']["text"] = "Downloading DEM..."
 
-    # get slope
-    # slope = get_slope(path_input_image)
+    # getting terrain
+    if data['use_terrain']:
+        if not ui is None:
+            ui['button_run']["text"] = "Downloading DEM..."
+        slope = get_slope(path_input_image)
 
     # define placeholder for final result
     inference = np.zeros([dataset_sar.height, dataset_sar.width])+255
@@ -71,34 +80,66 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
     # Do the inference!
     if not ui is None:
         ui['button_run']["text"] = "Doing the inference..."
+    
     batch_count = 0
     
     for batch in tqdm(starting_coordinates_batches, desc='Inference:'):
         batch_s1 = []
+        batch_slope = []
+        batch_dm = []
         for i,j in batch:
-            if sar_is_dB: # data in dB
-                s1 = data_scaler.normalize_data(
-                    's1_during_flood', 
-                    np.stack([
-                        vv[i:i+data['chip_size'], j:j+data['chip_size']], 
-                        vh[i:i+data['chip_size'], j:j+data['chip_size']]
-                    ])
-                )
-            else: # data is linear
-                s1 = data_scaler.normalize_data(
-                    's1_during_flood', 
-                    np.stack([
-                        10*np.log10(vv[i:i+data['chip_size'], j:j+data['chip_size']]), 
-                        10*np.log10(vh[i:i+data['chip_size'], j:j+data['chip_size']])
-                    ])
-                )
+            # loads sar data
+            s1 = np.stack([
+                vv[i:i+data['chip_size'], j:j+data['chip_size']], 
+                vh[i:i+data['chip_size'], j:j+data['chip_size']]
+            ])
+
+            if not sar_is_dB: # convert linear data to dB
+                s1 = 10*np.log10(s1)
+            
+            match data['data_preprocessing']:
+                case 'normalize':
+                    s1 = data_scaler.normalize_data('s1_during_flood', s1)
+                case 'scale':
+                    s1 = data_scaler.scale_data('s1_during_flood', s1)
+                case _:
+                    raise ValueError(f'Model metadata data_preprocessing is {data["data_preprocessing"]} (not supported).')
+            
             batch_s1.append(s1)
+
+            # doing terrain if necessary
+            if data['use_terrain']:
+                t = np.stack([np.zeros([data['chip_size'],data['chip_size']]), slope[i:i+data['chip_size'], j:j+data['chip_size']]])
+                match data['data_preprocessing']:
+                    case 'normalize':
+                        t = data_scaler.normalize_data('terrain', t)
+                    case 'scale':
+                        t = data_scaler.scale_data('terrain', t)
+                    case _:
+                        raise ValueError(f'Model metadata data_preprocessing is {data["data_preprocessing"]} (not supported).')
+                batch_slope.append(t[1])
+            
+            # doing distance map if necessary
+            if data['use_distance_map']:
+                coords_f, coords_n, dmap = get_points_and_distance_map(s1, t, max_points_per_class_map=100)
+                batch_dm.append(dmap)
         
         batch_s1 = np.array(batch_s1)
         batch_s1[np.isnan(batch_s1)] = 0
-        
-        batch_data = torch.Tensor(np.asarray(batch_s1, dtype=np.float32)).to(device)
 
+        batch_data = torch.Tensor(np.asarray(batch_s1, dtype=np.float32))
+
+        if data['use_terrain']:
+            batch_slope = torch.Tensor(np.array(batch_slope)[:,None,:,:])
+            batch_data = torch.cat([batch_data, batch_slope], dim=1)
+        
+        if data['use_distance_map']:
+            batch_dm = torch.Tensor(np.array(batch_dm))
+            batch_data = torch.cat([batch_data, batch_dm], dim=1)
+        
+        batch_data = batch_data.to(device)
+
+        # doing the inference
         with torch.no_grad():
             tiles_pred = torch.argmax(model(batch_data).detach().cpu(), axis=1)
             index = 0
@@ -131,6 +172,7 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
 
         with r.open(result_path, 'w', **profile) as dst:
             dst.write(inference.astype(r.uint8), 1)
+            dst.descriptions = ['Flood Mask']
     
     if not ui is None:
         ui['button_run']['state'] = 'normal'
