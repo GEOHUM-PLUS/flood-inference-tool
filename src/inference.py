@@ -7,11 +7,14 @@ from threading import Thread
 from skimage.morphology import area_opening, area_closing
 import warnings
 import rasterio as r
+import time
+import tkinter as tk
 
 from src.models import UNetSemanticSegmentation
 from src.helpers import DataScaler, get_slope, get_points_and_distance_map, tile_cleaner
 
 def inference(model_path, path_input_image, result_path, clean_result=False, ui=None, device=torch.device('cpu'), sar_is_dB:bool=False, bayesian_dropout:bool=False):
+    time_start = time.time()
     # check if it's running the ui or terminal version
     if not ui is None:
         ui['progress_bar']['value'] = 0
@@ -52,7 +55,9 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
         slope = get_slope(path_input_image)
 
     # define placeholder for final result
-    inference = np.zeros([dataset_sar.height, dataset_sar.width])+255
+    inference = np.zeros([3, dataset_sar.height, dataset_sar.width])
+    if bayesian_dropout:
+        uncertainty = np.zeros([dataset_sar.height, dataset_sar.width], dtype=np.float32)
     
     # define tiles for processing and batches as well
     if not ui is None:
@@ -141,18 +146,23 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
 
         # doing the inference
         with torch.no_grad():
-            tiles_pred = torch.argmax(model(batch_data).detach().cpu(), axis=1)
-            index = 0
-            for i,j in batch:
-                inference[i:i+data['chip_size'], j:j+data['chip_size']] = tiles_pred[index].numpy()
-                index+=1
+            for repetition in range(1 if not bayesian_dropout else 10):
+                tiles_pred = model(batch_data).detach().cpu().numpy()
+                index = 0
+                for i,j in batch:
+                    inference[:, i:i+data['chip_size'], j:j+data['chip_size']] += tiles_pred[index] if model_path=='models/UNet.pt' else np.concat([np.zeros_like(tiles_pred[index][0][None,:,:]), tiles_pred[index]], axis=0)
+                    if bayesian_dropout:
+                        uncertainty[i:i+data['chip_size'], j:j+data['chip_size']] += -1*np.sum(np.log(tiles_pred[index])*tiles_pred[index], 0)
+                    index+=1
         
         batch_count+=1
         if not ui is None:
             ui['progress_bar']['value'] = 100*batch_count/len(starting_coordinates_batches)
     
     # final correction
-    inference[vv==0] = 0
+    inference[:,vv==0] = 0
+    if bayesian_dropout:
+        uncertainty[~np.isfinite(uncertainty)] = 0
 
     # clean if necessary
     if clean_result:
@@ -165,22 +175,29 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
     with r.Env():
         profile = dataset_sar.profile
         profile.update(
-            dtype=r.uint8,
-            count=1,
-            nodata=0,
+            dtype=r.uint8 if not bayesian_dropout else r.float32,
+            count=1 if not bayesian_dropout else 2,
+            nodata=0 if not bayesian_dropout else None,
             compress='lzw')
 
         with r.open(result_path, 'w', **profile) as dst:
-            dst.write(inference.astype(r.uint8), 1)
-            dst.descriptions = ['Flood Mask']
+            dst.write(np.argmax(inference, axis=0).astype(r.uint8 if not bayesian_dropout else r.float32), 1)
+            if bayesian_dropout:
+                dst.write(uncertainty.astype(r.float32), 2)
+            dst.descriptions = ['Flood Mask'] if not bayesian_dropout else ['Flood Mask', 'Dropout Uncertainty']
     
+    time_end = time.time()
+    time_elapsed = time_end-time_start
+    print(f'Total time: {time_elapsed/60:.2f} minutes.')
+
     if not ui is None:
+        alert_finished(result_path, time_elapsed)
         ui['button_run']['state'] = 'normal'
         ui['button_run']["text"] = "Start Processing"
 
 # TODO: Check if inputs are valid
 # TODO: Disable everything in the UI
-def start_processing(model_name, input_image_path, output_path, post_processing=False, window=None, pb=None, device=None, bt_run=None, sar_is_dB:bool=False):
+def start_processing(model_name, input_image_path, output_path, post_processing=False, window=None, pb=None, device=None, bt_run=None, sar_is_dB:bool=False, bayesian_dropout:bool=False):
     if not input_image_path:
         show_error('Please insert an input path!')
         return
@@ -205,6 +222,13 @@ def start_processing(model_name, input_image_path, output_path, post_processing=
             post_processing, 
             None if window is None else {'window': window, 'progress_bar': pb, 'button_run': bt_run},
             device,
-            sar_is_dB
+            sar_is_dB,
+            bayesian_dropout
         )
     ).start()
+
+def show_error(message):
+    tk.messagebox.showerror(title='Error', message=message)
+
+def alert_finished(output_path, elapsed_time_minutes):
+    tk.messagebox.showinfo(title='Processing Finished', message=f'Process finished!\nLocation: {output_path}\nTime: {elapsed_time_minutes:.2f} minutes.')

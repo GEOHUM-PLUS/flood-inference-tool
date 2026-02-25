@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import torch
 import glob
 import os
+import datetime
 
 from src.inference import start_processing
 
@@ -74,11 +75,18 @@ def build_ui():
         devices.append('mps')
     device_menu = tk.OptionMenu(frame, var_device, *devices).pack(side=tk.LEFT)
     frame.pack(fill=tk.X)
+
+    # checkbox clean
+    frame = tk.Frame(window)
+    use_bayesian_dropout = tk.BooleanVar(window, value=False)
+    checkbox_bayesian_dropout = tk.Checkbutton(master=frame, text='Use Bayesian Dropout to estimate uncertainty', variable=use_bayesian_dropout)
+    checkbox_bayesian_dropout.pack(side=tk.LEFT)
+    frame.pack(fill=tk.X)
     
     # checkbox clean
     frame = tk.Frame(window)
     use_postprocess = tk.BooleanVar(window, value=False)
-    checkbox_postprocess = tk.Checkbutton(master=frame, text='Apply post-processing', variable=use_postprocess)
+    checkbox_postprocess = tk.Checkbutton(master=frame, text='Remove noise from flood map', variable=use_postprocess)
     checkbox_postprocess.pack(side=tk.LEFT)
     frame.pack(fill=tk.X)
 
@@ -94,7 +102,8 @@ def build_ui():
             pb=progressbar, 
             device=var_device.get(),
             bt_run=button_run,
-            sar_is_dB=sar_is_dB.get()
+            sar_is_dB=sar_is_dB.get(),
+            bayesian_dropout=use_bayesian_dropout.get()
         )
     )
     button_run.pack()
@@ -103,6 +112,8 @@ def build_ui():
     progressbar = ttk.Progressbar(length=500, maximum=100)
     progressbar.pack()
 
+    window.attributes('-topmost', True)
+    
     window.mainloop()
 
 def get_file_path(entry):
@@ -121,3 +132,6 @@ def create_file_path(entry):
 
 def show_error(message):
     tk.messagebox.showerror(title='Error', message=message)
+
+def alert_finished(output_path, elapsed_time_minutes):
+    tk.messagebox.showinfo(title='Processing Finished', message=f'Process finished!\nLocation: {output_path}\nTime: {elapsed_time_minutes:.2f} minutes.')
