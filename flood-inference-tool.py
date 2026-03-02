@@ -10,7 +10,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.ba
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-ui', '--ui-mode', action='store_true', help='Activate UI mode. Ignores all other options given.')
-    parser.add_argument('-i', '--input_path', type=str, help='The path to the input image containing VH and VV bands (in this order).')
+    parser.add_argument('-i', '--input_path', type=str, help='The path to the input image containing VH and VV bands (in this order) or PlanetScope.')
+    parser.add_argument('-i_aux', '--input_path_auxiliary', type=str, help='The path to the auxiliary image for PlanetScope.')
     parser.add_argument('-o', '--output-path', type=str, help='The path to the final result.')
     parser.add_argument('-pp', '--post-processing', action='store_true', help='Wheter or not to apply postprocessing and reduce noise in the results.')
     parser.add_argument('-d', '--device', default='cpu', type=str, help='The device used to run the inference. Example values are "cpu", "cuda", and "mps".')
@@ -35,4 +36,13 @@ if __name__=='__main__':
         except:
             warnings.warn(f'Device "{args.device}" not available, defaulting to "cpu".')
             DEVICE = 'cpu'
-        start_processing(args.model, args.input_path, args.output_path, post_processing=args.post_processing, device=DEVICE, sar_is_dB=args.dB, bayesian_dropout=args.bayesian_dropout)
+        start_processing(
+            args.model,
+            args.input_path,
+            args.output_path,
+            post_processing=args.post_processing, 
+            device=DEVICE,
+            sar_is_dB=args.dB,
+            bayesian_dropout=args.bayesian_dropout,
+            input_image_path_aux=args.input_path_auxiliary
+        )

@@ -61,19 +61,21 @@ def get_points_loss(s1, t, flood_mask, max_points_per_class_loss=500, p=0.3):
 
 class DataScaler:
     def __init__(self):
-        with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'percentile_limits.pickle'), 'rb') as f:
-            self.STRETCH_LIMITS = pickle.load(f)
+        with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'statistics_s1.pickle'), 'rb') as f:
+            self.STATISTICS_S1 = pickle.load(f)
             self.percentile_bttm = 5
             self.percentile_top = 95
+        with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'statistics_planetscope.pickle'), 'rb') as f:
+            self.STATISTICS_PLANETSCOPE = pickle.load(f)
     
     def scale_data(self, data_type, data):
         # follows scales only if needed
         if data_type in ['s1_before_flood', 's1_during_flood', 's2_before_flood', 's2_during_flood', 'terrain']:
             for i in range(data.shape[0]):
-                data[i,:,:] = (data[i,:,:]-self.STRETCH_LIMITS[data_type][i][str(int(self.percentile_bttm))])/(self.STRETCH_LIMITS[data_type][i][str(int(self.percentile_top))]-self.STRETCH_LIMITS[data_type][i][str(int(self.percentile_bttm))])
+                data[i,:,:] = (data[i,:,:]-self.STATISTICS_S1[data_type][i][str(int(self.percentile_bttm))])/(self.STATISTICS_S1[data_type][i][str(int(self.percentile_top))]-self.STATISTICS_S1[data_type][i][str(int(self.percentile_bttm))])
         else:
             for i in range(data.shape[0]):
-                data[i,:,:] = (data[i,:,:]-self.STRETCH_LIMITS[data_type][i]['0'])/(self.STRETCH_LIMITS[data_type][i]['100']-self.STRETCH_LIMITS[data_type][i]['0'])
+                data[i,:,:] = (data[i,:,:]-self.STATISTICS_S1[data_type][i]['0'])/(self.STATISTICS_S1[data_type][i]['100']-self.STATISTICS_S1[data_type][i]['0'])
         
         # clipping to 0 1
         data = np.clip(data, a_min=0, a_max=1)
@@ -84,13 +86,16 @@ class DataScaler:
         # follows scales only if needed
         if data_type in ['s1_before_flood', 's1_during_flood', 's2_before_flood', 's2_during_flood', 'terrain', 'global_surfece_water']:
             for i in range(data.shape[0]):
-                data[i,:,:] = (data[i,:,:]-self.STRETCH_LIMITS[data_type][i]['mean'])/self.STRETCH_LIMITS[data_type][i]['std']
+                data[i,:,:] = (data[i,:,:]-self.STATISTICS_S1[data_type][i]['mean'])/self.STATISTICS_S1[data_type][i]['std']
+        elif data_type == 'planetscope':
+            for i in range(data.shape[0]):
+                data[i,:,:] = (data[i,:,:]-self.STATISTICS_PLANETSCOPE['PS']['mean'][i])/self.STATISTICS_PLANETSCOPE['PS']['std'][i]
         elif data_type == 'LULC':
             # data = np.moveaxis(get_one_hot((data[0]/10).astype(np.byte), 11), -1,0)
             data = torch.nn.functional.one_hot(torch.Tensor((data[0]/10)-1).to(torch.long), num_classes=10).moveaxis(-1,0).numpy()
         else:
             for i in range(data.shape[0]):
-                data[i,:,:] = (data[i,:,:]-self.STRETCH_LIMITS[data_type][i]['0'])/(self.STRETCH_LIMITS[data_type][i]['100']-self.STRETCH_LIMITS[data_type][i]['0'])
+                data[i,:,:] = (data[i,:,:]-self.STATISTICS_S1[data_type][i]['0'])/(self.STATISTICS_S1[data_type][i]['100']-self.STATISTICS_S1[data_type][i]['0'])
 
         return data
     
@@ -98,10 +103,13 @@ class DataScaler:
         # follows scales only if needed
         if data_type in ['s1_before_flood', 's1_during_flood', 's2_before_flood', 's2_during_flood', 'terrain', 'global_surfece_water']:
             for i in range(data.shape[0]):
-                data[i,:,:] = (data[i,:,:]*self.STRETCH_LIMITS[data_type][i]['std'])+self.STRETCH_LIMITS[data_type][i]['mean']
+                data[i,:,:] = (data[i,:,:]*self.STATISTICS_S1[data_type][i]['std'])+self.STATISTICS_S1[data_type][i]['mean']
+        if data_type == 'planetscope':
+            for i in range(data.shape[0]):
+                data[i,:,:] = (data[i,:,:]*self.STATISTICS['PS']['std'][i])+self.STATISTICS['PS']['mean'][i]
         else:
             for i in range(data.shape[0]):
-                data[i,:,:] = (data[i,:,:]*(self.STRETCH_LIMITS[data_type][i]['100']-self.STRETCH_LIMITS[data_type][i]['0']))+self.STRETCH_LIMITS[data_type][i]['0']
+                data[i,:,:] = (data[i,:,:]*(self.STATISTICS_S1[data_type][i]['100']-self.STATISTICS_S1[data_type][i]['0']))+self.STATISTICS_S1[data_type][i]['0']
 
         return data
 
