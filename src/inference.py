@@ -159,7 +159,7 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
             
             bayesian_dropout = False
             
-            inference, nodata_mask = apply_otsu_threshold(path_input_image)
+            inference, nodata_mask = apply_otsu_threshold(path_input_image, sar_data_is_in_dB)
 
     # clean small areas if necessary
     if clean_result:
@@ -277,10 +277,12 @@ def load_and_normalize_sentinel_1_data(path_input_image, data_is_in_dB:bool=Fals
     
     return data, nodata_mask
 
-def apply_otsu_threshold(input_path):
+def apply_otsu_threshold(input_path, data_is_in_dB):
     from skimage.filters import threshold_otsu
     vh = r.open(input_path).read(1)
     nodata_mask = vh==0
+    if not data_is_in_dB:
+        vh = 10*np.log10(vh)
     otsu_value = threshold_otsu(vh[~nodata_mask])
 
     otsued_data = (vh<=otsu_value).astype(np.uint8)
