@@ -10,8 +10,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.ba
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-ui', '--ui-mode', action='store_true', help='Activate UI mode. Ignores all other options given.')
-    parser.add_argument('-i', '--input_path', type=str, help='The path to the input image containing VH and VV bands (in this order) or PlanetScope.')
-    parser.add_argument('-i_aux', '--input_path_auxiliary', type=str, help='The path to the auxiliary image for PlanetScope.')
+
+    parser.add_argument('-i_s1', '--input_file_sentinel_1', nargs='+', type=str, help='The path to the input image from Sentinel-1. Bands VH and VV bands (in this order).')
+    parser.add_argument('-i_ps', '--input_files_planetscope', nargs='+', type=str, help='The paths to the input images from PlanetScope. Image 1: bands BGRN (in this order), Image 2: Aux with cloud mask.')
+    parser.add_argument('-i_pn', '--input_files_pneo', nargs='+', type=str, help='The paths to the input images from Pleiades Neo. Image 1: bands RGB (in this order), Image 2: bands NED (in this order).')
+
     parser.add_argument('-o', '--output-path', type=str, help='The path to the final result.')
     parser.add_argument('-pp', '--post-processing', action='store_true', help='Wheter or not to apply postprocessing and reduce noise in the results.')
     parser.add_argument('-d', '--device', default='cpu', type=str, help='The device used to run the inference. Example values are "cpu", "cuda", and "mps".')
@@ -22,10 +25,19 @@ if __name__=='__main__':
     args = parser.parse_args()
 
     if not args.ui_mode:
-        if not args.input_path:
-            raise ValueError('Input path must be given with -i or --input-path.')
-        if not args.output_path:
-            raise ValueError('Output path must be given with -o or --output-path.')
+        if args.input_file_sentinel_1 is None and args.input_files_planetscope is None and args.input_files_pneo is None:
+            raise IOError('Please provide one of the following options: --input_file_sentinel_1, --input_files_planetscope, --input_files_pneo')
+        
+        if not args.input_files_planetscope is None:
+            if len(args.input_files_planetscope) != 2:
+                raise IOError('Please provide both Image 1 (BGRN) and Image 2 (cloud mask) only.')
+        
+        if not args.input_files_pneo is None:
+            if len(args.input_files_pneo) != 2:
+                raise IOError('Please provide both Image 1 (RGB) and Image 2 (NED) only.')
+        
+        if args.model is None:
+            raise IOError('Please provide a model name (with extension).')
 
     if args.ui_mode:
         build_ui()
@@ -37,12 +49,16 @@ if __name__=='__main__':
             warnings.warn(f'Device "{args.device}" not available, defaulting to "cpu".')
             DEVICE = 'cpu'
         start_processing(
-            args.model,
-            args.input_path,
-            args.output_path,
+            model_name=args.model,
+            input_info={
+                'input_files': args.input_file_sentinel_1 if not args.input_file_sentinel_1 is None else args.input_files_planetscope if not args.input_files_planetscope is None else args.input_files_pneo if not args.input_files_pneo is None else '',
+                'data_type': 'sentinel-1' if not args.input_file_sentinel_1 is None else 'planetscope' if not args.input_files_planetscope is None else 'pleiades-neo' if not args.input_files_pneo is None else '',
+                'sar_is_dB': args.dB
+            },
+            output_path=args.output_path,
             post_processing=args.post_processing, 
             device=DEVICE,
-            sar_is_dB=args.dB,
-            bayesian_dropout=args.bayesian_dropout,
-            input_image_path_aux=args.input_path_auxiliary
+            bayesian_dropout=args.bayesian_dropout
         )
+
+        # sentinel-1: [image1: VH-VV], planetscope: [image1: B-G-R-N, image2: aux], pleiades-neo: [image1: R-G-B, image2: N-E-D]

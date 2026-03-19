@@ -111,14 +111,17 @@ def add_Sentinel_1_tab(window):
         text = 'Start Processing',
         command = lambda:start_processing(
             model_name=var_model.get(),
-            input_image_path=input_path.get(),
+            input_info={
+                'input_paths': [input_path.get()],
+                'sar_is_dB': sar_is_dB.get(),
+                'data_type': 'sentinel-1'
+            },
             output_path=output_path.get(),
             post_processing=use_postprocess.get(),
             window=window,
             pb=progressbar,
             device=var_device.get(),
             bt_run=button_run,
-            sar_is_dB=sar_is_dB.get(),
             bayesian_dropout=use_bayesian_dropout.get()
         )
     )
@@ -206,15 +209,17 @@ def add_PlanetScope_tab(window):
         text = 'Start Processing',
         command = lambda:start_processing(
             model_name=var_model.get(),
-            input_image_path=input_path.get(),
+            input_info={
+                'input_files': [input_path.get(), input_path_auxiliary.get()],
+                'data_type': 'planetscope'
+            },
             output_path=output_path.get(),
             post_processing=use_postprocess.get(),
             window=window,
             pb=progressbar,
             device=var_device.get(),
             bt_run=button_run,
-            bayesian_dropout=use_bayesian_dropout.get(),
-            input_image_path_aux=input_path_auxiliary.get()
+            bayesian_dropout=use_bayesian_dropout.get()
         )
     )
     button_run.pack()

@@ -13,8 +13,17 @@ import tkinter as tk
 from src.models import UNetSemanticSegmentation
 from src.helpers import DataScaler, get_slope, get_points_and_distance_map, tile_cleaner
 
-def inference(model_path, path_input_image, result_path, clean_result=False, ui=None, device=torch.device('cpu'), 
-    sar_is_dB:bool=False, bayesian_dropout:bool=False, path_input_image_aux:str=None):
+def inference(model_path:str, input_info:dict, result_path:str, clean_result:bool=False, ui=None, device=torch.device('cpu'), 
+    bayesian_dropout:bool=False):
+    '''
+    input_info should have the following keys:
+        input_files:list
+            sentinel-1: [image1: VH-VV], planetscope: [image1: B-G-R-N, image2: aux], pleiades-neo: [image1: R-G-B, image2: N-E-D]
+        data_type:str
+            "sentinel-1", "planetscope", or "pleiades-neo"
+        sar_is_dB:bool
+            wheter or not SAR data is in decibels
+    '''
     time_start = time.time()
     # check if it's running the ui or terminal version
     if not ui is None:
@@ -45,17 +54,23 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
                 if m.__class__.__name__.startswith('Dropout'):
                     m.train()
 
-        # load data scaler
-        data_scaler = DataScaler()
+        # load input spectral data
+        dataset, nodata_mask = load_input_data(
+            input_files = input_info['input_files'],
+            data_type = input_info['data_type'],
+            sar_data_is_in_dB = input_info['sar_is_dB'] if 'sar_is_dB' in input_info.keys() else True,
+            processing_type = model_data['data_preprocessing']
+        )
+        dataset = np.stack([np.pad(dataset[i], pad_width=model_data['chip_border'], mode='reflect') for i in range(len(dataset))])
 
-        # load input data
-        dataset, nodata_mask = load_input_data(path_input_image, model_data['data_type'], sar_is_dB, model_data['data_preprocessing'], path_input_image_aux)
-
-        # getting terrain
+        # getting terrain slope
         if model_data['use_terrain']:
             if not ui is None:
                 ui['button_run']["text"] = "Downloading DEM..."
-            slope = get_slope(path_input_image)
+            slope = get_slope(input_info['input_files'][0])
+
+            # load data scaler
+            data_scaler = DataScaler()
 
         # define placeholder for final result
         inference = np.zeros([3, dataset.shape[1], dataset.shape[2]])
@@ -69,11 +84,11 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
         starting_coordinates_batches = []
         batch_size = 8
         batch = []
-        for i in range(0, dataset.shape[1], int(model_data['chip_size']/2)):
+        for i in range(0, dataset.shape[1], int(model_data['chip_size']-2*model_data['chip_border'])):
             if i+model_data['chip_size']>dataset.shape[1]:
                 i = dataset.shape[1]-model_data['chip_size']
             
-            for j in range(0, dataset.shape[2], int(model_data['chip_size']/2)):
+            for j in range(0, dataset.shape[2], int(model_data['chip_size']-2*model_data['chip_border'])):
                 if j+model_data['chip_size']>dataset.shape[2]:
                     j = dataset.shape[2]-model_data['chip_size']
 
@@ -101,7 +116,7 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
                 input_data = dataset[:, i:i+model_data['chip_size'], j:j+model_data['chip_size']]
                 batch_input_data.append(input_data)
 
-                # doing terrain if necessary
+                # adding terrain if necessary
                 if model_data['use_terrain']:
                     t = np.stack([np.zeros([model_data['chip_size'],model_data['chip_size']]), slope[i:i+model_data['chip_size'], j:j+model_data['chip_size']]])
                     match model_data['data_preprocessing']:
@@ -135,13 +150,21 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
 
             # doing the inference
             with torch.no_grad():
-                for repetition in range(1 if not bayesian_dropout else 10):
+                for repetition in range(1 if not bayesian_dropout else 25):
                     tiles_pred = model(batch_data).detach().cpu().numpy()
                     index = 0
                     for i,j in batch:
-                        inference[:, i:i+model_data['chip_size'], j:j+model_data['chip_size']] += tiles_pred[index] if model_path=='models/UNet-S1.pt' else np.concat([np.zeros_like(tiles_pred[index][0][None,:,:]), tiles_pred[index]], axis=0)
+                        inference[
+                            :, 
+                            i+model_data['chip_border']:i+model_data['chip_size']-model_data['chip_border'], 
+                            j+model_data['chip_border']:j+model_data['chip_size']-model_data['chip_border']] += (
+                                tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border']] if model_path=='models/UNet-S1.pt'
+                                else np.concat([
+                                    np.zeros_like(tiles_pred[index][0])[None,model_data['chip_border']:-model_data['chip_border'], model_data['chip_border']:-model_data['chip_border']],
+                                    tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border'], model_data['chip_border']:-model_data['chip_border']]
+                                ], axis=0))
                         if bayesian_dropout:
-                            uncertainty[i:i+model_data['chip_size'], j:j+model_data['chip_size']] += -1*np.sum(np.log(tiles_pred[index])*tiles_pred[index], 0)
+                            uncertainty[i+model_data['chip_border']:i+model_data['chip_size']-model_data['chip_border'], j+model_data['chip_border']:j+model_data['chip_size']-model_data['chip_border']] += -1*np.sum(np.log(tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border'],model_data['chip_border']:-model_data['chip_border']])*tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border'],model_data['chip_border']:-model_data['chip_border']], 0)
                         index+=1
             
             batch_count+=1
@@ -149,17 +172,22 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
                 ui['progress_bar']['value'] = 100*batch_count/len(starting_coordinates_batches)
         
         # final prediction
-        inference = (inference[-1]>=1).astype(np.byte) if not bayesian_dropout else np.argmax(inference, axis=0).astype(np.byte)
-    
+        inference = np.argmax(inference[:, model_data['chip_border']:-model_data['chip_border'], model_data['chip_border']:-model_data['chip_border']], axis=0).astype(np.byte)
+        if bayesian_dropout:
+            uncertainty = uncertainty[model_data['chip_border']:-model_data['chip_border'], model_data['chip_border']:-model_data['chip_border']]
+
     # if it is not a model that rely on neural networks
     else:
         if model_path=='models/Otsu_Threshold':
             if not ui is None:
                 ui['button_run']["text"] = "Applying Otsu Threshold..."
             
+            if input_info['data_type']!='sentinel-1':
+                raise IOError('Unsuitable data type for Otsu Thresholding.')
+
             bayesian_dropout = False
             
-            inference, nodata_mask = apply_otsu_threshold(path_input_image, sar_data_is_in_dB)
+            inference, nodata_mask = apply_otsu_threshold(input_info['input_files'][0], sar_is_dB)
 
     # clean small areas if necessary
     if clean_result:
@@ -169,14 +197,14 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
         inference = tile_cleaner(inference, 500, 16, 2)
     
     # setting no data correctly
-    inference += 1
+    # inference += 1
     inference[nodata_mask] = 0
     if bayesian_dropout:
         uncertainty[~np.isfinite(uncertainty)] = 0
     
     # saving final result
     with r.Env():
-        profile = r.open(path_input_image).profile
+        profile = r.open(input_info['input_files'][0]).profile
         profile.update(
             dtype=r.uint8 if not bayesian_dropout else r.float32,
             count=1 if not bayesian_dropout else 2,
@@ -200,14 +228,8 @@ def inference(model_path, path_input_image, result_path, clean_result=False, ui=
 
 # TODO: Check if inputs are valid
 # TODO: Disable everything in the UI
-def start_processing(model_name, input_image_path, output_path, post_processing=False, window=None, pb=None, 
-    device=None, bt_run=None, sar_is_dB:bool=False, bayesian_dropout:bool=False, input_image_path_aux:str=None):
-    if not input_image_path:
-        show_error('Please insert an input path!')
-        return
-    if not output_path:
-        show_error('Please insert an output path!')
-        return
+def start_processing(model_name, input_info, output_path, post_processing=False, window=None, pb=None, 
+    device=None, bt_run=None, bayesian_dropout:bool=False):
 
     # if input_image_path and output_path:
     os.makedirs('images', exist_ok=True)
@@ -221,23 +243,24 @@ def start_processing(model_name, input_image_path, output_path, post_processing=
         target=inference,
         args=(
             f'models/{model_name}',
-            input_image_path, 
+            input_info, 
             output_path, 
             post_processing, 
             None if window is None else {'window': window, 'progress_bar': pb, 'button_run': bt_run},
             device,
-            sar_is_dB,
-            bayesian_dropout,
-            input_image_path_aux
+            bayesian_dropout
         )
     ).start()
 
-def load_input_data(path_input_image, data_type, sar_data_is_in_dB:bool=False, processing_type:str='normalize', path_input_image_aux:str=None):
-    if data_type == 's1_during_flood':
-        data, nodata_mask = load_and_normalize_sentinel_1_data(path_input_image, sar_data_is_in_dB, processing_type)
+def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=False, processing_type:str='normalize', path_input_image_aux:str=None):
+    if data_type == 'sentinel-1':
+        data, nodata_mask = load_and_normalize_sentinel_1_data(input_info['input_files'][0], sar_data_is_in_dB, processing_type)
         
     if data_type == 'planetscope':
-        data, nodata_mask = load_and_normalize_planetscope_data(path_input_image, path_input_image_aux)
+        data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1])
+    
+    if data_type == 'pleiades-neo':
+        data, nodata_mask = load_and_normalize_pleiades_neo_data(input_files[0], input_files[1])
 
     return data, nodata_mask
 
@@ -251,6 +274,23 @@ def load_and_normalize_planetscope_data(input_path, input_path_aux):
     ], axis=0).astype(np.float32)
 
     nodata_mask = r.open(input_path_aux).read(1)==0
+
+    for i in range(4):
+        data[i] = (data[i]-np.mean(data[i, ~nodata_mask]))/np.std(data[i, ~nodata_mask])
+    
+    return data, nodata_mask
+
+def load_and_normalize_pleiades_neo_data(input_path_RGB, input_path_NED):
+    input_RGB = r.open(input_path_RGB)
+    input_NED = r.open(input_path_NED)
+    data = np.stack([
+        input_RGB.read(3),
+        input_RGB.read(2),
+        input_RGB.read(1),
+        input_NED.read(1)
+    ], axis=0).astype(np.float32)
+
+    nodata_mask = data[0]==0
 
     for i in range(4):
         data[i] = (data[i]-np.mean(data[i, ~nodata_mask]))/np.std(data[i, ~nodata_mask])
