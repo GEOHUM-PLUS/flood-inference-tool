@@ -87,6 +87,10 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
             if not ui is None:
                 ui['button_run']["text"] = "Downloading DEM..."
             slope = get_slope(input_info['input_files'][0])
+            # dataset was padded by chip_border above so tiles can overlap at the
+            # edges; slope must match that padded shape or edge tiles' slices
+            # come back smaller than chip_size.
+            slope = np.pad(slope, pad_width=model_data['chip_border'], mode='reflect')
 
             # load data scaler
             data_scaler = DataScaler()
@@ -213,7 +217,12 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
         print('Post-processing end result...')
         if not ui is None:
             ui['button_run']["text"] = "Post-processing..."
-        inference = tile_cleaner(inference, 500, 16, 2)
+        # Otsu thresholding produces a binary {0: dry, 1: flood} map, while the
+        # neural-net models produce {0: unused/reserved, 1: dry, 2: flood}.
+        if model_path=='models/Otsu_Threshold':
+            inference = tile_cleaner(inference, 500, 16, foreground_val=1, background_val=0)
+        else:
+            inference = tile_cleaner(inference, 500, 16, foreground_val=2, background_val=1)
     
     # setting no data correctly
     # inference += 1
@@ -293,6 +302,10 @@ SENTINEL_2_BAND_IDS = {
     'swir22': 'B12'
 }
 
+# Scene Classification Layer codes treated as unusable for flood mapping: cloud
+# shadows (3), cloud medium probability (8), cloud high probability (9).
+SENTINEL_2_CLOUD_SCL_CLASSES = (3, 8, 9)
+
 def load_and_normalize_sentinel_2_data(input_path):
     if os.path.isdir(input_path):
         return load_and_normalize_sentinel_2_safe_folder(input_path)
@@ -306,6 +319,12 @@ def load_and_normalize_sentinel_2_data(input_path):
     swir22 = dataset_s2.read(6)
 
     nodata_mask = blue==0
+
+    # an optional 7th band (SCL) enables cloud/cloud-shadow masking; older
+    # 6-band files (or manually prepared ones) simply won't have it
+    if dataset_s2.count >= 7:
+        scl = dataset_s2.read(7)
+        nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
 
     data = np.stack([blue, green, red, nir, swir16, swir22]).astype(np.float32)
 
@@ -347,6 +366,12 @@ def load_and_normalize_sentinel_2_safe_folder(safe_folder):
 
     data = np.stack(bands).astype(np.float32)
     nodata_mask = data[0]==0
+
+    # SCL is categorical, so it must be resampled with nearest neighbor, not bilinear
+    scl_path = find_sentinel_2_band_path(safe_folder, 'SCL')
+    with r.open(scl_path) as dataset:
+        scl = dataset.read(1, out_shape=ref_shape, resampling=Resampling.nearest)
+    nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
 
     return data, nodata_mask
 

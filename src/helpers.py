@@ -11,7 +11,6 @@ import pystac_client
 import planetary_computer
 import geopandas
 from shapely import Polygon
-import subprocess
 from skimage.morphology import area_opening, area_closing
 from tqdm.auto import tqdm
 
@@ -113,6 +112,36 @@ class DataScaler:
 
         return data
 
+def compute_slope_degrees(dem, transform, scale=111120.0, nodata_value=-9999.0):
+    '''
+    Slope in degrees, replicating gdaldem's "-alg ZevenbergenThorne -s <scale>"
+    (without "-compute_edges") in pure numpy (no gdaldem CLI dependency).
+    Like gdaldem's default, the outermost 1-pixel border (which has no full
+    3x3 neighborhood) is set to `nodata_value` rather than computed.
+
+    `scale` is the ratio of vertical (elevation) to horizontal units, same as
+    gdaldem's `-s` flag; 111120 (meters per degree) is used because the DEM here
+    is in geographic (EPSG:4326) coordinates while elevation is in meters.
+    '''
+    ew_res = abs(transform.a) * scale
+    ns_res = abs(transform.e) * scale
+
+    dem = dem.astype(np.float64)
+
+    west = dem[1:-1, :-2]
+    east = dem[1:-1, 2:]
+    north = dem[:-2, 1:-1]
+    south = dem[2:, 1:-1]
+
+    dz_dx = (east - west) / (2 * ew_res)
+    dz_dy = (south - north) / (2 * ns_res)
+
+    slope_deg = np.degrees(np.arctan(np.sqrt(dz_dx**2 + dz_dy**2)))
+
+    result = np.full(dem.shape, nodata_value, dtype=np.float32)
+    result[1:-1, 1:-1] = slope_deg.astype(np.float32)
+    return result
+
 def get_slope(path_reference):
     print('Getting slope...')
     catalog = pystac_client.Client.open(
@@ -162,22 +191,29 @@ def get_slope(path_reference):
     
     merged = merge_arrays(arrays)
 
-    merged.rio.to_raster('images/COP-DEM-GLO-30.tif', driver='GTiff', compress='LZW')
+    slope_data = compute_slope_degrees(merged.to_numpy()[0], merged.rio.transform())
+    slope = merged.copy(data=slope_data[np.newaxis, :, :])
+    slope = slope.rio.write_nodata(-9999.0)
 
-    subprocess.call(f'gdaldem slope images/COP-DEM-GLO-30.tif images/slope.tif -alg ZevenbergenThorne -s 111120', shell=True)
-
-    slope = rioxarray.open_rasterio('images/slope.tif')
     ref = rioxarray.open_rasterio(path_reference)
-
     matched = slope.rio.reproject_match(ref)
 
     return matched.to_numpy()[0]
 
 # TODO: Paralellize this
-def tile_cleaner(data, tile_size=1000, min_feature_size_px=16, nodata_val=255):
-    result = np.zeros(data.shape, dtype=np.uint8)
-    data2 = data.copy()
-    data2[data2==nodata_val] = 0
+def tile_cleaner(data, tile_size=1000, min_feature_size_px=16, foreground_val=1, background_val=0):
+    '''
+    Removes small noise specks from a two-class classification map by
+    area-opening the foreground class (erasing small isolated foreground
+    blobs) and area-closing it (filling small background holes), so noise
+    is reclassified into whichever class surrounds it rather than being
+    zeroed out into a third, undefined value. Runs in overlapping tiles to
+    bound memory use on large rasters; pixel values other than
+    foreground_val/background_val (e.g. true nodata) are left untouched by
+    the caller applying its own nodata mask afterwards.
+    '''
+    foreground = data==foreground_val
+    result = np.zeros(data.shape, dtype=bool)
 
     for i in tqdm(range(0, data.shape[0], tile_size-min_feature_size_px), ncols=70):
         if i+tile_size>result.shape[0]:
@@ -185,22 +221,23 @@ def tile_cleaner(data, tile_size=1000, min_feature_size_px=16, nodata_val=255):
         for j in range(0, data.shape[1], tile_size-min_feature_size_px):
             if j+tile_size > result.shape[1]:
                 j = result.shape[1]-tile_size
-            
-            if np.sum(data2[i:i+tile_size, j:j+tile_size]==0)!=tile_size*tile_size:
-                result[i:i+tile_size, j:j+tile_size] = (
-                    result[i:i+tile_size, j:j+tile_size]+
-                    area_closing(
-                        area_opening(
-                            data2[i:i+tile_size, j:j+tile_size], min_feature_size_px
-                        ), min_feature_size_px
-                    )
+
+            if np.any(foreground[i:i+tile_size, j:j+tile_size]):
+                result[i:i+tile_size, j:j+tile_size] |= area_closing(
+                    area_opening(
+                        foreground[i:i+tile_size, j:j+tile_size], min_feature_size_px
+                    ), min_feature_size_px
                 )
 
             if j == result.shape[1]-tile_size:
                 break
-        
+
         if i == result.shape[0]-tile_size:
             break
-    result = np.asarray(result>0, dtype=np.uint8)
-    result[data==nodata_val] = nodata_val
-    return result
+
+    cleaned = np.where(result, foreground_val, background_val).astype(data.dtype)
+    # pixel values that were neither the foreground nor background class
+    # (e.g. true nodata already encoded in `data`) are preserved as-is
+    other = (data!=foreground_val) & (data!=background_val)
+    cleaned[other] = data[other]
+    return cleaned

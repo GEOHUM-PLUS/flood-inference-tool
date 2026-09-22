@@ -15,5 +15,6 @@ dependencies:
       - rioxarray
       - scikit-image
       - shapely
+      - tkintermapview
       - torch
       - tqdm

@@ -10,3 +10,4 @@ shapely
 rioxarray
 scikit-image
 pillow
+tkintermapview
