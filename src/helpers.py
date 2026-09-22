@@ -201,10 +201,19 @@ def get_slope(path_reference):
     return matched.to_numpy()[0]
 
 # TODO: Paralellize this
-def tile_cleaner(data, tile_size=1000, min_feature_size_px=16, nodata_val=255):
-    result = np.zeros(data.shape, dtype=np.uint8)
-    data2 = data.copy()
-    data2[data2==nodata_val] = 0
+def tile_cleaner(data, tile_size=1000, min_feature_size_px=16, foreground_val=1, background_val=0):
+    '''
+    Removes small noise specks from a two-class classification map by
+    area-opening the foreground class (erasing small isolated foreground
+    blobs) and area-closing it (filling small background holes), so noise
+    is reclassified into whichever class surrounds it rather than being
+    zeroed out into a third, undefined value. Runs in overlapping tiles to
+    bound memory use on large rasters; pixel values other than
+    foreground_val/background_val (e.g. true nodata) are left untouched by
+    the caller applying its own nodata mask afterwards.
+    '''
+    foreground = data==foreground_val
+    result = np.zeros(data.shape, dtype=bool)
 
     for i in tqdm(range(0, data.shape[0], tile_size-min_feature_size_px), ncols=70):
         if i+tile_size>result.shape[0]:
@@ -212,22 +221,23 @@ def tile_cleaner(data, tile_size=1000, min_feature_size_px=16, nodata_val=255):
         for j in range(0, data.shape[1], tile_size-min_feature_size_px):
             if j+tile_size > result.shape[1]:
                 j = result.shape[1]-tile_size
-            
-            if np.sum(data2[i:i+tile_size, j:j+tile_size]==0)!=tile_size*tile_size:
-                result[i:i+tile_size, j:j+tile_size] = (
-                    result[i:i+tile_size, j:j+tile_size]+
-                    area_closing(
-                        area_opening(
-                            data2[i:i+tile_size, j:j+tile_size], min_feature_size_px
-                        ), min_feature_size_px
-                    )
+
+            if np.any(foreground[i:i+tile_size, j:j+tile_size]):
+                result[i:i+tile_size, j:j+tile_size] |= area_closing(
+                    area_opening(
+                        foreground[i:i+tile_size, j:j+tile_size], min_feature_size_px
+                    ), min_feature_size_px
                 )
 
             if j == result.shape[1]-tile_size:
                 break
-        
+
         if i == result.shape[0]-tile_size:
             break
-    result = np.asarray(result>0, dtype=np.uint8)
-    result[data==nodata_val] = nodata_val
-    return result
+
+    cleaned = np.where(result, foreground_val, background_val).astype(data.dtype)
+    # pixel values that were neither the foreground nor background class
+    # (e.g. true nodata already encoded in `data`) are preserved as-is
+    other = (data!=foreground_val) & (data!=background_val)
+    cleaned[other] = data[other]
+    return cleaned

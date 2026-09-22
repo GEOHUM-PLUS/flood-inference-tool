@@ -217,7 +217,12 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
         print('Post-processing end result...')
         if not ui is None:
             ui['button_run']["text"] = "Post-processing..."
-        inference = tile_cleaner(inference, 500, 16, 2)
+        # Otsu thresholding produces a binary {0: dry, 1: flood} map, while the
+        # neural-net models produce {0: unused/reserved, 1: dry, 2: flood}.
+        if model_path=='models/Otsu_Threshold':
+            inference = tile_cleaner(inference, 500, 16, foreground_val=1, background_val=0)
+        else:
+            inference = tile_cleaner(inference, 500, 16, foreground_val=2, background_val=1)
     
     # setting no data correctly
     # inference += 1
