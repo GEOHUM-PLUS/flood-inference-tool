@@ -18,9 +18,9 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
     '''
     input_info should have the following keys:
         input_files:list
-            sentinel-1: [image1: VH-VV], planetscope: [image1: B-G-R-N, image2: aux], pleiades-neo: [image1: R-G-B, image2: N-E-D]
+            sentinel-1: [image1: VH-VV], planetscope: [image1: B-G-R-N, image2: aux]
         data_type:str
-            "sentinel-1", "planetscope", or "pleiades-neo"
+            "sentinel-1" or "planetscope"
         sar_is_dB:bool
             wheter or not SAR data is in decibels
     '''
@@ -258,9 +258,6 @@ def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=Fals
         
     if data_type == 'planetscope':
         data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1])
-    
-    if data_type == 'pleiades-neo':
-        data, nodata_mask = load_and_normalize_pleiades_neo_data(input_files[0], input_files[1])
 
     return data, nodata_mask
 
@@ -274,23 +271,6 @@ def load_and_normalize_planetscope_data(input_path, input_path_aux):
     ], axis=0).astype(np.float32)
 
     nodata_mask = r.open(input_path_aux).read(1)==0
-
-    for i in range(4):
-        data[i] = (data[i]-np.mean(data[i, ~nodata_mask]))/np.std(data[i, ~nodata_mask])
-    
-    return data, nodata_mask
-
-def load_and_normalize_pleiades_neo_data(input_path_RGB, input_path_NED):
-    input_RGB = r.open(input_path_RGB)
-    input_NED = r.open(input_path_NED)
-    data = np.stack([
-        input_RGB.read(3),
-        input_RGB.read(2),
-        input_RGB.read(1),
-        input_NED.read(1)
-    ], axis=0).astype(np.float32)
-
-    nodata_mask = data[0]==0
 
     for i in range(4):
         data[i] = (data[i]-np.mean(data[i, ~nodata_mask]))/np.std(data[i, ~nodata_mask])
