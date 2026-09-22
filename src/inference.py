@@ -293,6 +293,10 @@ SENTINEL_2_BAND_IDS = {
     'swir22': 'B12'
 }
 
+# Scene Classification Layer codes treated as unusable for flood mapping: cloud
+# shadows (3), cloud medium probability (8), cloud high probability (9).
+SENTINEL_2_CLOUD_SCL_CLASSES = (3, 8, 9)
+
 def load_and_normalize_sentinel_2_data(input_path):
     if os.path.isdir(input_path):
         return load_and_normalize_sentinel_2_safe_folder(input_path)
@@ -306,6 +310,12 @@ def load_and_normalize_sentinel_2_data(input_path):
     swir22 = dataset_s2.read(6)
 
     nodata_mask = blue==0
+
+    # an optional 7th band (SCL) enables cloud/cloud-shadow masking; older
+    # 6-band files (or manually prepared ones) simply won't have it
+    if dataset_s2.count >= 7:
+        scl = dataset_s2.read(7)
+        nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
 
     data = np.stack([blue, green, red, nir, swir16, swir22]).astype(np.float32)
 
@@ -347,6 +357,12 @@ def load_and_normalize_sentinel_2_safe_folder(safe_folder):
 
     data = np.stack(bands).astype(np.float32)
     nodata_mask = data[0]==0
+
+    # SCL is categorical, so it must be resampled with nearest neighbor, not bilinear
+    scl_path = find_sentinel_2_band_path(safe_folder, 'SCL')
+    with r.open(scl_path) as dataset:
+        scl = dataset.read(1, out_shape=ref_shape, resampling=Resampling.nearest)
+    nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
 
     return data, nodata_mask
 

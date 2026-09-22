@@ -63,13 +63,21 @@ def download_sentinel_2_window(item, bbox, output_path):
             window = windows.from_bounds(*window_bounds, transform=dataset.transform)
             bands.append(dataset.read(1, window=window, out_shape=ref_shape, resampling=Resampling.bilinear, boundless=True, fill_value=0))
 
+    # SCL (scene classification, for cloud/cloud-shadow masking) is categorical,
+    # so it must be resampled with nearest neighbor, not bilinear
+    with r.open(item.assets['SCL'].href) as dataset:
+        window_bounds = transform_bounds('EPSG:4326', dataset.crs, *bbox)
+        window = windows.from_bounds(*window_bounds, transform=dataset.transform)
+        bands.append(dataset.read(1, window=window, out_shape=ref_shape, resampling=Resampling.nearest, boundless=True, fill_value=0))
+
+    band_names = SENTINEL_2_BAND_ORDER + ['SCL']
     data = np.stack(bands).astype(np.float32)
 
     profile = {
         'driver': 'GTiff',
         'height': ref_shape[0],
         'width': ref_shape[1],
-        'count': len(SENTINEL_2_BAND_ORDER),
+        'count': len(band_names),
         'dtype': 'float32',
         'crs': ref_crs,
         'transform': ref_transform,
@@ -77,6 +85,6 @@ def download_sentinel_2_window(item, bbox, output_path):
     }
     with r.open(output_path, 'w', **profile) as dst:
         dst.write(data)
-        dst.descriptions = SENTINEL_2_BAND_ORDER
+        dst.descriptions = band_names
 
     return output_path
