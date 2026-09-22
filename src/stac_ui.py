@@ -9,18 +9,34 @@ from PIL import Image, ImageTk
 from tkintermapview import TkinterMapView
 from tkintermapview.utility_functions import decimal_to_osm
 
-from src.stac import search_sentinel_2, download_sentinel_2_window
+from src.stac import search_sentinel_2, download_sentinel_2_window, search_sentinel_1, download_sentinel_1_window
 
 DEFAULT_MAP_POSITION = (47.803, 13.035)
 DEFAULT_MAP_ZOOM = 5
 DEFAULT_SEARCH_WINDOW_DAYS = 30
 PREVIEW_ASSET_KEYS = ['rendered_preview', 'thumbnail', 'visual']
 
-def open_stac_search_window(parent, on_download):
-    '''Opens a window to search Sentinel-2 scenes on Planetary Computer's STAC catalog by
-    drawing a bounding box on a map, then download only that bbox's window of the required
-    bands for a chosen scene. on_download(output_path) is called once a download finishes.'''
-    StacSearchWindow(parent, on_download)
+STAC_DATA_TYPES = {
+    'sentinel-2': {
+        'title': 'Sentinel-2',
+        'search': search_sentinel_2,
+        'download': download_sentinel_2_window,
+        'show_cloud_cover': True,
+    },
+    'sentinel-1': {
+        'title': 'Sentinel-1',
+        'search': search_sentinel_1,
+        'download': download_sentinel_1_window,
+        'show_cloud_cover': False,
+    },
+}
+
+def open_stac_search_window(parent, on_download, data_type='sentinel-2'):
+    '''Opens a window to search Sentinel-1/Sentinel-2 scenes on Planetary Computer's STAC
+    catalog by drawing a bounding box on a map, then download only that bbox's window of the
+    required bands for a chosen scene. on_download(output_path) is called once a download
+    finishes.'''
+    StacSearchWindow(parent, on_download, data_type)
 
 class CanvasImageOverlay:
     '''A simple axis-aligned image overlay for TkinterMapView, positioned to a bbox
@@ -82,8 +98,9 @@ class CanvasImageOverlay:
         self.deleted = True
 
 class StacSearchWindow:
-    def __init__(self, parent, on_download):
+    def __init__(self, parent, on_download, data_type='sentinel-2'):
         self.on_download = on_download
+        self.type_config = STAC_DATA_TYPES[data_type]
         self.bbox = None
         self.items = []
         self.drawing = False
@@ -93,7 +110,7 @@ class StacSearchWindow:
         self.preview_overlay = None
 
         self.window = tk.Toplevel(parent)
-        self.window.title('Search Sentinel-2 (STAC)')
+        self.window.title(f'Search {self.type_config["title"]} (STAC)')
 
         self.map_widget = TkinterMapView(self.window, width=760, height=480, corner_radius=0)
         self.map_widget.set_position(*DEFAULT_MAP_POSITION)
@@ -119,9 +136,10 @@ class StacSearchWindow:
         self.date_end_var = tk.StringVar(self.window, value=date_end.isoformat())
         tk.Entry(controls, width=12, textvariable=self.date_end_var).grid(row=1, column=3)
 
-        tk.Label(controls, text='Max cloud cover (%):').grid(row=1, column=4, sticky='e')
         self.cloud_cover_var = tk.StringVar(self.window, value='90')
-        tk.Entry(controls, width=6, textvariable=self.cloud_cover_var).grid(row=1, column=5)
+        if self.type_config['show_cloud_cover']:
+            tk.Label(controls, text='Max cloud cover (%):').grid(row=1, column=4, sticky='e')
+            tk.Entry(controls, width=6, textvariable=self.cloud_cover_var).grid(row=1, column=5)
 
         self.search_button = tk.Button(controls, text='Search', command=self.search)
         self.search_button.grid(row=1, column=6, padx=(10, 0))
@@ -206,15 +224,19 @@ class StacSearchWindow:
         if self.bbox is None:
             messagebox.showerror('Error', 'Please draw a bounding box on the map first.')
             return
-        try:
-            max_cloud_cover = float(self.cloud_cover_var.get())
-        except ValueError:
-            messagebox.showerror('Error', 'Max cloud cover must be a number.')
-            return
+
+        search_kwargs = {}
+        if self.type_config['show_cloud_cover']:
+            try:
+                search_kwargs['max_cloud_cover'] = float(self.cloud_cover_var.get())
+            except ValueError:
+                messagebox.showerror('Error', 'Max cloud cover must be a number.')
+                return
 
         date_start = self.date_start_var.get()
         date_end = self.date_end_var.get()
         bbox = self.bbox
+        search_fn = self.type_config['search']
 
         self.search_button.config(state='disabled', text='Searching...')
         self.results_listbox.delete(0, tk.END)
@@ -222,7 +244,7 @@ class StacSearchWindow:
 
         def run_search():
             try:
-                items = search_sentinel_2(bbox, date_start, date_end, max_cloud_cover)
+                items = search_fn(bbox, date_start, date_end, **search_kwargs)
             except Exception as exc:
                 self.window.after(0, lambda exc=exc: self.search_failed(exc))
                 return
@@ -238,11 +260,17 @@ class StacSearchWindow:
         self.items = items
         self.search_button.config(state='normal', text='Search')
         for item in items:
-            cloud_cover = item.properties.get('eo:cloud_cover', float('nan'))
-            date_text = item.datetime.strftime('%Y-%m-%d %H:%M') if item.datetime else '?'
-            self.results_listbox.insert(tk.END, f'{date_text}  |  cloud cover: {cloud_cover:5.1f}%  |  {item.id}')
+            self.results_listbox.insert(tk.END, self.format_result_line(item))
         if not items:
-            messagebox.showinfo('No results', 'No Sentinel-2 scenes found for this area, date range, and cloud cover.')
+            messagebox.showinfo('No results', f'No {self.type_config["title"]} scenes found for this area and date range.')
+
+    def format_result_line(self, item):
+        date_text = item.datetime.strftime('%Y-%m-%d %H:%M') if item.datetime else '?'
+        if self.type_config['show_cloud_cover']:
+            cloud_cover = item.properties.get('eo:cloud_cover', float('nan'))
+            return f'{date_text}  |  cloud cover: {cloud_cover:5.1f}%  |  {item.id}'
+        orbit = item.properties.get('sat:orbit_state', '?')
+        return f'{date_text}  |  orbit: {orbit:10s}  |  {item.id}'
 
     def on_result_selected(self, event):
         selection = self.results_listbox.curselection()
@@ -284,6 +312,7 @@ class StacSearchWindow:
             return
 
         bbox = self.bbox
+        download_fn = self.type_config['download']
         self.download_button.config(state='disabled', text='Downloading...')
         self.download_progressbar['value'] = 0
 
@@ -292,7 +321,7 @@ class StacSearchWindow:
 
         def run_download():
             try:
-                download_sentinel_2_window(item, bbox, output_path, progress_callback=report_progress)
+                download_fn(item, bbox, output_path, progress_callback=report_progress)
             except Exception as exc:
                 self.window.after(0, lambda exc=exc: self.download_failed(exc))
                 return

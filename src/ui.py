@@ -36,7 +36,8 @@ def build_ui():
         data_type='sentinel-1',
         input_labels=['Input file:'],
         models=MODEL_OPTIONS['sentinel-1'],
-        show_dB_checkbox=True
+        show_dB_checkbox=True,
+        stac_search=True
     )
 
     frame = ttk.Frame(notebook)
@@ -71,7 +72,7 @@ def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, in
     input_vars = [add_file_row(window, label, folder=input_is_folder) for label in input_labels]
 
     if stac_search:
-        add_stac_search_row(window, input_vars[0])
+        add_stac_search_row(window, input_vars[0], data_type)
 
     sar_is_dB = add_checkbox_row(window, 'SAR data is in dB') if show_dB_checkbox else None
 
@@ -126,18 +127,23 @@ def add_file_row(window, label_text, save=False, folder=False):
 
     return path_var
 
-def add_stac_search_row(window, target_path_var):
+STAC_SEARCH_LABELS = {
+    'sentinel-1': 'Search Sentinel-1 via STAC...',
+    'sentinel-2': 'Search Sentinel-2 via STAC...',
+}
+
+def add_stac_search_row(window, target_path_var, data_type):
     frame = tk.Frame(window)
-    tk.Button(master=frame, text='Search Sentinel-2 via STAC...', command=lambda: launch_stac_search(window, target_path_var)).pack(side=tk.LEFT)
+    tk.Button(master=frame, text=STAC_SEARCH_LABELS[data_type], command=lambda: launch_stac_search(window, target_path_var, data_type)).pack(side=tk.LEFT)
     frame.pack(fill=tk.X)
 
-def launch_stac_search(parent, target_path_var):
+def launch_stac_search(parent, target_path_var, data_type):
     try:
         from src.stac_ui import open_stac_search_window
     except ImportError as exc:
         tk.messagebox.showerror(title='Missing dependency', message=f'STAC search requires the "tkintermapview" package to be installed.\n\n{exc}')
         return
-    open_stac_search_window(parent, on_download=target_path_var.set)
+    open_stac_search_window(parent, on_download=target_path_var.set, data_type=data_type)
 
 def add_checkbox_row(window, text, default=False):
     frame = tk.Frame(window)
