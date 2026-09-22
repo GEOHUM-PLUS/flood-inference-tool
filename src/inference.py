@@ -87,6 +87,10 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
             if not ui is None:
                 ui['button_run']["text"] = "Downloading DEM..."
             slope = get_slope(input_info['input_files'][0])
+            # dataset was padded by chip_border above so tiles can overlap at the
+            # edges; slope must match that padded shape or edge tiles' slices
+            # come back smaller than chip_size.
+            slope = np.pad(slope, pad_width=model_data['chip_border'], mode='reflect')
 
             # load data scaler
             data_scaler = DataScaler()

@@ -11,7 +11,6 @@ import pystac_client
 import planetary_computer
 import geopandas
 from shapely import Polygon
-import subprocess
 from skimage.morphology import area_opening, area_closing
 from tqdm.auto import tqdm
 
@@ -113,6 +112,36 @@ class DataScaler:
 
         return data
 
+def compute_slope_degrees(dem, transform, scale=111120.0, nodata_value=-9999.0):
+    '''
+    Slope in degrees, replicating gdaldem's "-alg ZevenbergenThorne -s <scale>"
+    (without "-compute_edges") in pure numpy (no gdaldem CLI dependency).
+    Like gdaldem's default, the outermost 1-pixel border (which has no full
+    3x3 neighborhood) is set to `nodata_value` rather than computed.
+
+    `scale` is the ratio of vertical (elevation) to horizontal units, same as
+    gdaldem's `-s` flag; 111120 (meters per degree) is used because the DEM here
+    is in geographic (EPSG:4326) coordinates while elevation is in meters.
+    '''
+    ew_res = abs(transform.a) * scale
+    ns_res = abs(transform.e) * scale
+
+    dem = dem.astype(np.float64)
+
+    west = dem[1:-1, :-2]
+    east = dem[1:-1, 2:]
+    north = dem[:-2, 1:-1]
+    south = dem[2:, 1:-1]
+
+    dz_dx = (east - west) / (2 * ew_res)
+    dz_dy = (south - north) / (2 * ns_res)
+
+    slope_deg = np.degrees(np.arctan(np.sqrt(dz_dx**2 + dz_dy**2)))
+
+    result = np.full(dem.shape, nodata_value, dtype=np.float32)
+    result[1:-1, 1:-1] = slope_deg.astype(np.float32)
+    return result
+
 def get_slope(path_reference):
     print('Getting slope...')
     catalog = pystac_client.Client.open(
@@ -162,13 +191,11 @@ def get_slope(path_reference):
     
     merged = merge_arrays(arrays)
 
-    merged.rio.to_raster('images/COP-DEM-GLO-30.tif', driver='GTiff', compress='LZW')
+    slope_data = compute_slope_degrees(merged.to_numpy()[0], merged.rio.transform())
+    slope = merged.copy(data=slope_data[np.newaxis, :, :])
+    slope = slope.rio.write_nodata(-9999.0)
 
-    subprocess.call(f'gdaldem slope images/COP-DEM-GLO-30.tif images/slope.tif -alg ZevenbergenThorne -s 111120', shell=True)
-
-    slope = rioxarray.open_rasterio('images/slope.tif')
     ref = rioxarray.open_rasterio(path_reference)
-
     matched = slope.rio.reproject_match(ref)
 
     return matched.to_numpy()[0]
