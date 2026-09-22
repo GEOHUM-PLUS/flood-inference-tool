@@ -2,11 +2,13 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from PIL import Image, ImageTk
 import torch
-import glob
-import os
-import datetime
 
 from src.inference import start_processing
+
+MODEL_OPTIONS = {
+    'sentinel-1': ['UNet-S1.pt', 'DistanceMap.pt', 'Otsu_Threshold'],
+    'planetscope': ['UNet-PlanetScope.pt'],
+}
 
 def build_ui():
     window = tk.Tk()
@@ -27,95 +29,55 @@ def build_ui():
     notebook = ttk.Notebook(window)
 
     frame = ttk.Frame(notebook)
-    notebook.add(frame,text='Sentinel-1')
-    add_Sentinel_1_tab(frame)
+    notebook.add(frame, text='Sentinel-1')
+    build_data_tab(
+        frame,
+        data_type='sentinel-1',
+        input_labels=['Input file:'],
+        models=MODEL_OPTIONS['sentinel-1'],
+        show_dB_checkbox=True
+    )
 
     frame = ttk.Frame(notebook)
-    notebook.add(frame,text='PlanetScope')
-    add_PlanetScope_tab(frame)
-    notebook.pack(pady=(10,0))
+    notebook.add(frame, text='PlanetScope')
+    build_data_tab(
+        frame,
+        data_type='planetscope',
+        input_labels=['Input file:', 'Input auxiliary file:'],
+        models=MODEL_OPTIONS['planetscope'],
+        show_dB_checkbox=False
+    )
+
+    notebook.pack(pady=(10, 0))
 
     # window.attributes('-topmost', True)
-    
+
     window.mainloop()
 
-def add_Sentinel_1_tab(window):
-    # input
-    frame_input_1 = tk.Frame(window)
-    frame_input_2 = tk.Frame(window)
-    input_label = tk.Label(text='Input file:', master=frame_input_1).pack(side=tk.LEFT)
-    input_path = tk.StringVar(window)
-    w_input_path = tk.Entry(master=frame_input_2, width=50, textvariable=input_path)
-    w_input_path.pack(side=tk.LEFT)
+def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox):
+    input_vars = [add_file_row(window, label) for label in input_labels]
 
-    w_input_path_button = tk.Button(master=frame_input_2, text='...', command=lambda:get_file_path(w_input_path)).pack(side=tk.LEFT)
+    sar_is_dB = add_checkbox_row(window, 'SAR data is in dB') if show_dB_checkbox else None
 
-    frame_input_1.pack(fill=tk.X)
-    frame_input_2.pack(fill=tk.X)
+    output_path = add_file_row(window, 'Output file:', save=True)
 
-    # checkbox is dB
-    frame = tk.Frame(window)
-    sar_is_dB = tk.BooleanVar(window, value=False)
-    checkbox_dB = tk.Checkbutton(master=frame, text='SAR data is in dB', variable=sar_is_dB)
-    checkbox_dB.pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
+    var_model = add_dropdown_row(window, 'Model: ', models, '---')
+    var_device = add_dropdown_row(window, 'Device: ', get_available_devices(), 'cpu')
 
-    # output
-    frame_1 = tk.Frame(window)
-    frame_2 = tk.Frame(window)
-    output_label = tk.Label(text='Output file:', master=frame_1).pack(side=tk.LEFT)
-    output_path = tk.StringVar(window)
-    w_output_path = tk.Entry(master=frame_2, width=50, textvariable=output_path)
-    w_output_path.pack(side=tk.LEFT)
-    w_output_path_button = tk.Button(master=frame_2, text='...', command=lambda:create_file_path(w_output_path)).pack(side=tk.LEFT)
+    use_bayesian_dropout = add_checkbox_row(window, '(EXPERIMENTAL) Use Bayesian Dropout to estimate uncertainty')
+    use_postprocess = add_checkbox_row(window, 'Remove noise from flood map')
 
-    frame_1.pack(fill=tk.X)
-    frame_2.pack(fill=tk.X)
+    def run():
+        input_info = {
+            'input_files': [var.get() for var in input_vars],
+            'data_type': data_type,
+        }
+        if sar_is_dB is not None:
+            input_info['sar_is_dB'] = sar_is_dB.get()
 
-    # model options
-    frame = tk.Frame(window)
-    model_label = tk.Label(text='Model: ', master=frame).pack(side=tk.LEFT)
-    var_model = tk.StringVar(window, value='---')
-    models = ['UNet-S1.pt', 'DistanceMap.pt', 'Otsu_Threshold']
-    model_menu = tk.OptionMenu(frame, var_model, *models).pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-
-    # device options
-    frame = tk.Frame(window)
-    device_label = tk.Label(text='Device: ', master=frame).pack(side=tk.LEFT)
-    var_device = tk.StringVar(window, value='cpu')
-    devices = ['cpu']
-    if torch.cuda.is_available():
-        devices.append('cuda')
-    if torch.backends.mps.is_available():
-        devices.append('mps')
-    device_menu = tk.OptionMenu(frame, var_device, *devices).pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-
-    # checkbox clean
-    frame = tk.Frame(window)
-    use_bayesian_dropout = tk.BooleanVar(window, value=False)
-    checkbox_bayesian_dropout = tk.Checkbutton(master=frame, text='(EXPERIMENTAL) Use Bayesian Dropout to estimate uncertainty', variable=use_bayesian_dropout)
-    checkbox_bayesian_dropout.pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-    
-    # checkbox clean
-    frame = tk.Frame(window)
-    use_postprocess = tk.BooleanVar(window, value=False)
-    checkbox_postprocess = tk.Checkbutton(master=frame, text='Remove noise from flood map', variable=use_postprocess)
-    checkbox_postprocess.pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-
-    # run button
-    button_run = tk.Button(window,
-        text = 'Start Processing',
-        command = lambda:start_processing(
+        start_processing(
             model_name=var_model.get(),
-            input_info={
-                'input_paths': [input_path.get()],
-                'sar_is_dB': sar_is_dB.get(),
-                'data_type': 'sentinel-1'
-            },
+            input_info=input_info,
             output_path=output_path.get(),
             post_processing=use_postprocess.get(),
             window=window,
@@ -124,123 +86,64 @@ def add_Sentinel_1_tab(window):
             bt_run=button_run,
             bayesian_dropout=use_bayesian_dropout.get()
         )
-    )
+
+    button_run = tk.Button(window, text='Start Processing', command=run)
     button_run.pack()
 
-    # progressbar
     progressbar = ttk.Progressbar(window, length=500, maximum=100)
     progressbar.pack()
 
-def add_PlanetScope_tab(window):
-    # input
-    frame_input_1 = tk.Frame(window)
-    frame_input_2 = tk.Frame(window)
-    input_label = tk.Label(text='Input file:', master=frame_input_1).pack(side=tk.LEFT)
-    input_path = tk.StringVar(window)
-    w_input_path = tk.Entry(master=frame_input_2, width=50, textvariable=input_path)
-    w_input_path.pack(side=tk.LEFT)
+def add_file_row(window, label_text, save=False):
+    frame_label = tk.Frame(window)
+    frame_entry = tk.Frame(window)
+    tk.Label(text=label_text, master=frame_label).pack(side=tk.LEFT)
 
-    w_input_path_button = tk.Button(master=frame_input_2, text='...', command=lambda:get_file_path(w_input_path)).pack(side=tk.LEFT)
+    path_var = tk.StringVar(window)
+    entry = tk.Entry(master=frame_entry, width=50, textvariable=path_var)
+    entry.pack(side=tk.LEFT)
 
-    frame_input_1.pack(fill=tk.X)
-    frame_input_2.pack(fill=tk.X)
+    browse = create_file_path if save else get_file_path
+    tk.Button(master=frame_entry, text='...', command=lambda: browse(entry)).pack(side=tk.LEFT)
 
-    # input
-    frame_input_1 = tk.Frame(window)
-    frame_input_2 = tk.Frame(window)
-    input_label = tk.Label(text='Input auxiliary file:', master=frame_input_1).pack(side=tk.LEFT)
-    input_path_auxiliary = tk.StringVar(window)
-    w_input_path_aux = tk.Entry(master=frame_input_2, width=50, textvariable=input_path_auxiliary)
-    w_input_path_aux.pack(side=tk.LEFT)
+    frame_label.pack(fill=tk.X)
+    frame_entry.pack(fill=tk.X)
 
-    w_input_path_button = tk.Button(master=frame_input_2, text='...', command=lambda:get_file_path(w_input_path_aux)).pack(side=tk.LEFT)
+    return path_var
 
-    frame_input_1.pack(fill=tk.X)
-    frame_input_2.pack(fill=tk.X)
-
-    # output
-    frame_1 = tk.Frame(window)
-    frame_2 = tk.Frame(window)
-    output_label = tk.Label(text='Output file:', master=frame_1).pack(side=tk.LEFT)
-    output_path = tk.StringVar(window)
-    w_output_path = tk.Entry(master=frame_2, width=50, textvariable=output_path)
-    w_output_path.pack(side=tk.LEFT)
-    w_output_path_button = tk.Button(master=frame_2, text='...', command=lambda:create_file_path(w_output_path)).pack(side=tk.LEFT)
-
-    frame_1.pack(fill=tk.X)
-    frame_2.pack(fill=tk.X)
-
-    # model options
+def add_checkbox_row(window, text, default=False):
     frame = tk.Frame(window)
-    model_label = tk.Label(text='Model: ', master=frame).pack(side=tk.LEFT)
-    var_model = tk.StringVar(window, value='---')
-    models = ['UNet-PlanetScope.pt']
-    model_menu = tk.OptionMenu(frame, var_model, *models).pack(side=tk.LEFT)
+    var = tk.BooleanVar(window, value=default)
+    tk.Checkbutton(master=frame, text=text, variable=var).pack(side=tk.LEFT)
     frame.pack(fill=tk.X)
+    return var
 
-    # device options
+def add_dropdown_row(window, label_text, options, default):
     frame = tk.Frame(window)
-    device_label = tk.Label(text='Device: ', master=frame).pack(side=tk.LEFT)
-    var_device = tk.StringVar(window, value='cpu')
+    tk.Label(text=label_text, master=frame).pack(side=tk.LEFT)
+    var = tk.StringVar(window, value=default)
+    tk.OptionMenu(frame, var, *options).pack(side=tk.LEFT)
+    frame.pack(fill=tk.X)
+    return var
+
+def get_available_devices():
     devices = ['cpu']
     if torch.cuda.is_available():
         devices.append('cuda')
     if torch.backends.mps.is_available():
         devices.append('mps')
-    device_menu = tk.OptionMenu(frame, var_device, *devices).pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-
-    # checkbox clean
-    frame = tk.Frame(window)
-    use_bayesian_dropout = tk.BooleanVar(window, value=False)
-    checkbox_bayesian_dropout = tk.Checkbutton(master=frame, text='(EXPERIMENTAL) Use Bayesian Dropout to estimate uncertainty', variable=use_bayesian_dropout)
-    checkbox_bayesian_dropout.pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-    
-    # checkbox clean
-    frame = tk.Frame(window)
-    use_postprocess = tk.BooleanVar(window, value=False)
-    checkbox_postprocess = tk.Checkbutton(master=frame, text='Remove noise from flood map', variable=use_postprocess)
-    checkbox_postprocess.pack(side=tk.LEFT)
-    frame.pack(fill=tk.X)
-
-    # run button
-    button_run = tk.Button(window,
-        text = 'Start Processing',
-        command = lambda:start_processing(
-            model_name=var_model.get(),
-            input_info={
-                'input_files': [input_path.get(), input_path_auxiliary.get()],
-                'data_type': 'planetscope'
-            },
-            output_path=output_path.get(),
-            post_processing=use_postprocess.get(),
-            window=window,
-            pb=progressbar,
-            device=var_device.get(),
-            bt_run=button_run,
-            bayesian_dropout=use_bayesian_dropout.get()
-        )
-    )
-    button_run.pack()
-
-    # progressbar
-    progressbar = ttk.Progressbar(window, length=500, maximum=100)
-    progressbar.pack()
+    return devices
 
 def get_file_path(entry):
     file = filedialog.askopenfilename(filetypes=[('TIF', '*.tif')])
     if file:
         entry.delete(0, tk.END)
         entry.insert(0, file)
-        return
 
 def create_file_path(entry):
     file = filedialog.asksaveasfilename(filetypes=[('TIF', '*.tif')])
     if file:
         entry.delete(0, tk.END)
         entry.insert(0, file)
-        return
 
 def show_error(message):
     tk.messagebox.showerror(title='Error', message=message)
