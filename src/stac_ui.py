@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from threading import Thread
 import datetime
 import io
@@ -138,6 +138,9 @@ class StacSearchWindow:
 
         self.download_button = tk.Button(self.window, text='Download Selected', command=self.download_selected)
         self.download_button.pack(pady=(0, 5))
+
+        self.download_progressbar = ttk.Progressbar(self.window, length=500, maximum=100)
+        self.download_progressbar.pack(pady=(0, 5))
 
     def toggle_draw_mode(self):
         if not self.drawing:
@@ -282,10 +285,14 @@ class StacSearchWindow:
 
         bbox = self.bbox
         self.download_button.config(state='disabled', text='Downloading...')
+        self.download_progressbar['value'] = 0
+
+        def report_progress(done, total):
+            self.window.after(0, lambda done=done, total=total: self.update_download_progress(done, total))
 
         def run_download():
             try:
-                download_sentinel_2_window(item, bbox, output_path)
+                download_sentinel_2_window(item, bbox, output_path, progress_callback=report_progress)
             except Exception as exc:
                 self.window.after(0, lambda exc=exc: self.download_failed(exc))
                 return
@@ -293,8 +300,12 @@ class StacSearchWindow:
 
         Thread(target=run_download, daemon=True).start()
 
+    def update_download_progress(self, done, total):
+        self.download_progressbar['value'] = 100 * done / total
+
     def download_failed(self, exc):
         self.download_button.config(state='normal', text='Download Selected')
+        self.download_progressbar['value'] = 0
         messagebox.showerror('Download failed', str(exc))
 
     def download_done(self, output_path):

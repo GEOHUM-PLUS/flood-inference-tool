@@ -35,14 +35,20 @@ def search_sentinel_2(bbox, date_start, date_end, max_cloud_cover=90, limit=50):
     items.sort(key=lambda item: item.datetime, reverse=True)
     return items
 
-def download_sentinel_2_window(item, bbox, output_path):
+def download_sentinel_2_window(item, bbox, output_path, progress_callback=None):
     '''
     Downloads only the bbox-cropped region (EPSG:4326: min_lon, min_lat, max_lon, max_lat)
     of the blue/green/red/nir/swir16/swir22 bands directly from the item's remote
     Cloud-Optimized GeoTIFF assets (only the needed pixels are fetched, not the full scene),
     and writes them as a single local GeoTIFF compatible with the tool's Sentinel-2 input.
+
+    progress_callback(bands_done, bands_total), if given, is called after each band
+    (including SCL) finishes downloading.
     '''
     asset_hrefs = [item.assets[SENTINEL_2_BAND_IDS[name]].href for name in SENTINEL_2_BAND_ORDER]
+    band_names = SENTINEL_2_BAND_ORDER + ['SCL']
+    bands_total = len(band_names)
+    bands_done = 0
 
     with r.open(asset_hrefs[0]) as ref:
         ref_bounds = transform_bounds('EPSG:4326', ref.crs, *bbox)
@@ -55,6 +61,9 @@ def download_sentinel_2_window(item, bbox, output_path):
         ref_shape = (ref_window.height, ref_window.width)
         ref_crs = ref.crs
         blue = ref.read(1, window=ref_window, boundless=True, fill_value=0)
+    bands_done += 1
+    if progress_callback:
+        progress_callback(bands_done, bands_total)
 
     bands = [blue]
     for href in asset_hrefs[1:]:
@@ -62,6 +71,9 @@ def download_sentinel_2_window(item, bbox, output_path):
             window_bounds = transform_bounds('EPSG:4326', dataset.crs, *bbox)
             window = windows.from_bounds(*window_bounds, transform=dataset.transform)
             bands.append(dataset.read(1, window=window, out_shape=ref_shape, resampling=Resampling.bilinear, boundless=True, fill_value=0))
+        bands_done += 1
+        if progress_callback:
+            progress_callback(bands_done, bands_total)
 
     # SCL (scene classification, for cloud/cloud-shadow masking) is categorical,
     # so it must be resampled with nearest neighbor, not bilinear
@@ -69,8 +81,10 @@ def download_sentinel_2_window(item, bbox, output_path):
         window_bounds = transform_bounds('EPSG:4326', dataset.crs, *bbox)
         window = windows.from_bounds(*window_bounds, transform=dataset.transform)
         bands.append(dataset.read(1, window=window, out_shape=ref_shape, resampling=Resampling.nearest, boundless=True, fill_value=0))
+    bands_done += 1
+    if progress_callback:
+        progress_callback(bands_done, bands_total)
 
-    band_names = SENTINEL_2_BAND_ORDER + ['SCL']
     data = np.stack(bands).astype(np.float32)
 
     profile = {
