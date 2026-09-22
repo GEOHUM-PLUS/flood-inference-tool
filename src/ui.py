@@ -47,7 +47,8 @@ def build_ui():
         input_labels=['Input file or .SAFE folder:'],
         models=MODEL_OPTIONS['sentinel-2'],
         show_dB_checkbox=False,
-        input_is_folder=True
+        input_is_folder=True,
+        stac_search=True
     )
 
     frame = ttk.Frame(notebook)
@@ -66,8 +67,11 @@ def build_ui():
 
     window.mainloop()
 
-def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, input_is_folder=False):
+def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, input_is_folder=False, stac_search=False):
     input_vars = [add_file_row(window, label, folder=input_is_folder) for label in input_labels]
+
+    if stac_search:
+        add_stac_search_row(window, input_vars[0])
 
     sar_is_dB = add_checkbox_row(window, 'SAR data is in dB') if show_dB_checkbox else None
 
@@ -121,6 +125,19 @@ def add_file_row(window, label_text, save=False, folder=False):
     frame_entry.pack(fill=tk.X)
 
     return path_var
+
+def add_stac_search_row(window, target_path_var):
+    frame = tk.Frame(window)
+    tk.Button(master=frame, text='Search Sentinel-2 via STAC...', command=lambda: launch_stac_search(window, target_path_var)).pack(side=tk.LEFT)
+    frame.pack(fill=tk.X)
+
+def launch_stac_search(parent, target_path_var):
+    try:
+        from src.stac_ui import open_stac_search_window
+    except ImportError as exc:
+        tk.messagebox.showerror(title='Missing dependency', message=f'STAC search requires the "tkintermapview" package to be installed.\n\n{exc}')
+        return
+    open_stac_search_window(parent, on_download=target_path_var.set)
 
 def add_checkbox_row(window, text, default=False):
     frame = tk.Frame(window)
