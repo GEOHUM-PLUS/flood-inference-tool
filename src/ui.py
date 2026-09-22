@@ -7,6 +7,7 @@ from src.inference import start_processing
 
 MODEL_OPTIONS = {
     'sentinel-1': ['UNet-S1.pt', 'DistanceMap.pt', 'Otsu_Threshold'],
+    'sentinel-2': ['UNet-S2.pt'],
     'planetscope': ['UNet-PlanetScope.pt'],
 }
 
@@ -36,6 +37,16 @@ def build_ui():
         input_labels=['Input file:'],
         models=MODEL_OPTIONS['sentinel-1'],
         show_dB_checkbox=True
+    )
+
+    frame = ttk.Frame(notebook)
+    notebook.add(frame, text='Sentinel-2')
+    build_data_tab(
+        frame,
+        data_type='sentinel-2',
+        input_labels=['Input file:'],
+        models=MODEL_OPTIONS['sentinel-2'],
+        show_dB_checkbox=False
     )
 
     frame = ttk.Frame(notebook)

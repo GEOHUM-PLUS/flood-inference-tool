@@ -86,6 +86,68 @@ class UNetSemanticSegmentation(nn.Module):
         x = self.classification_head(x)
         return x
 
+class EncoderS2(nn.Module):
+    def __init__(self, in_channels:int=6, base:int=64, dropout_val=0.2):
+        super().__init__()
+        self.bn = nn.BatchNorm2d(in_channels)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.double_conv1 = DoubleConvBlock(in_channels, base, dropout_val=dropout_val)
+        self.double_conv2 = DoubleConvBlock(base, base*2, dropout_val=dropout_val)
+        self.double_conv3 = DoubleConvBlock(base*2, base*4, dropout_val=dropout_val)
+        self.double_conv4 = DoubleConvBlock(base*4, base*8, dropout_val=dropout_val)
+
+    def forward(self, x):
+        x = self.bn(x)
+        skip1 = self.double_conv1(x)
+        skip2 = self.double_conv2(self.pool(skip1))
+        skip3 = self.double_conv3(self.pool(skip2))
+        skip4 = self.double_conv4(self.pool(skip3))
+
+        return skip4, skip3, skip2, skip1
+
+class DecoderS2(nn.Module):
+    def __init__(self, out_channels:int=3, base:int=64, dropout_val=0.2):
+        super().__init__()
+        self.double_conv1 = DoubleConvBlock(base*2, base, dropout_val=dropout_val)
+        self.double_conv2 = DoubleConvBlock(base*4, base*2, dropout_val=dropout_val)
+        self.double_conv3 = DoubleConvBlock(base*8, base*4, dropout_val=dropout_val)
+
+        self.transp_conv1 = nn.ConvTranspose2d(base*8, base*4, kernel_size=2, stride=2)
+        self.transp_conv2 = nn.ConvTranspose2d(base*4, base*2, kernel_size=2, stride=2)
+        self.transp_conv3 = nn.ConvTranspose2d(base*2, base, kernel_size=2, stride=2)
+
+        self.out = nn.Sequential(
+            nn.Conv2d(base, out_channels, kernel_size=1, padding=0),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, skip4, skip3, skip2, skip1):
+        x = self.transp_conv1(skip4)
+        x = self.double_conv3(torch.cat([skip3, x], axis=1))
+
+        x = self.transp_conv2(x)
+        x = self.double_conv2(torch.cat([skip2, x], axis=1))
+
+        x = self.transp_conv3(x)
+        x = self.double_conv1(torch.cat([skip1, x], axis=1))
+
+        return self.out(x)
+
+class UNetSemanticSegmentationS2(nn.Module):
+    '''
+    Matches the checkpoint layout of models/UNet-S2.pt: a flat encoder/decoder
+    (no separate classification_head) with a learnable input BatchNorm2d,
+    trained on Sentinel-2 blue/green/red/nir/swir16/swir22 bands (in this order).
+    '''
+    def __init__(self, in_channels:int=6, out_channels:int=3, base:int=64, dropout_val=0.2):
+        super().__init__()
+        self.encoder = EncoderS2(in_channels, base, dropout_val)
+        self.decoder = DecoderS2(out_channels, base, dropout_val)
+
+    def forward(self, x):
+        skip4, skip3, skip2, skip1 = self.encoder(x)
+        return self.decoder(skip4, skip3, skip2, skip1)
+
 if __name__=='__main__':
     # show model
     model = UNetSemanticSegmentation(in_channels=3, out_channels=2, base=16)

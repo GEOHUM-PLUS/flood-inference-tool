@@ -1,4 +1,5 @@
 import os
+import pickle
 import torch
 import torch.nn as nn
 import numpy as np
@@ -10,7 +11,7 @@ import rasterio as r
 import time
 import tkinter as tk
 
-from src.models import UNetSemanticSegmentation
+from src.models import UNetSemanticSegmentation, UNetSemanticSegmentationS2
 from src.helpers import DataScaler, get_slope, get_points_and_distance_map, tile_cleaner
 
 def inference(model_path:str, input_info:dict, result_path:str, clean_result:bool=False, ui=None, device=torch.device('cpu'), 
@@ -18,9 +19,9 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
     '''
     input_info should have the following keys:
         input_files:list
-            sentinel-1: [image1: VH-VV], planetscope: [image1: B-G-R-N, image2: aux]
+            sentinel-1: [image1: VH-VV], sentinel-2: [image1: blue-green-red-nir-swir16-swir22], planetscope: [image1: B-G-R-N, image2: aux]
         data_type:str
-            "sentinel-1" or "planetscope"
+            "sentinel-1", "sentinel-2", or "planetscope"
         sar_is_dB:bool
             wheter or not SAR data is in decibels
     '''
@@ -32,7 +33,13 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
     # if it is a model that rely on neural networks...
     if not model_path in ['models/Otsu_Threshold']:
         # innitially load the model weights
-        model_data = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
+        try:
+            model_data = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
+        except pickle.UnpicklingError:
+            # some checkpoints (e.g. UNet-S2.pt) store extra numpy-typed training
+            # metadata (loss curves) that the safe unpickler rejects; model files
+            # under models/ are trusted local input to this tool.
+            model_data = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
 
         # load model for inference
         match model_path:
@@ -42,9 +49,18 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
                 model = UNetSemanticSegmentation(in_channels=4, out_channels=2, base=32).to(device)
             case 'models/UNet-PlanetScope.pt':
                 model = UNetSemanticSegmentation(in_channels=4, out_channels=2, base=32).to(device)
+            case 'models/UNet-S2.pt':
+                model = UNetSemanticSegmentationS2(in_channels=6, out_channels=3, base=64).to(device)
+                # this checkpoint was saved without the tiling metadata the other
+                # models carry; these mirror the values used to train/predict with it.
+                model_data.setdefault('chip_size', 256)
+                model_data.setdefault('chip_border', 94)
+                model_data.setdefault('use_terrain', False)
+                model_data.setdefault('use_distance_map', False)
+                model_data.setdefault('data_preprocessing', 'none')
             case _:
                 raise ValueError(f'{model_path} is not a valid model name.')
-        
+
         model.load_state_dict(model_data['model_state_dict'])
         model.eval()
 
@@ -158,7 +174,7 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
                             :, 
                             i+model_data['chip_border']:i+model_data['chip_size']-model_data['chip_border'], 
                             j+model_data['chip_border']:j+model_data['chip_size']-model_data['chip_border']] += (
-                                tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border']] if model_path=='models/UNet-S1.pt'
+                                tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border'],model_data['chip_border']:-model_data['chip_border']] if model_path in ('models/UNet-S1.pt', 'models/UNet-S2.pt')
                                 else np.concat([
                                     np.zeros_like(tiles_pred[index][0])[None,model_data['chip_border']:-model_data['chip_border'], model_data['chip_border']:-model_data['chip_border']],
                                     tiles_pred[index][:,model_data['chip_border']:-model_data['chip_border'], model_data['chip_border']:-model_data['chip_border']]
@@ -254,10 +270,28 @@ def start_processing(model_name, input_info, output_path, post_processing=False,
 
 def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=False, processing_type:str='normalize', path_input_image_aux:str=None):
     if data_type == 'sentinel-1':
-        data, nodata_mask = load_and_normalize_sentinel_1_data(input_info['input_files'][0], sar_data_is_in_dB, processing_type)
+        data, nodata_mask = load_and_normalize_sentinel_1_data(input_files[0], sar_data_is_in_dB, processing_type)
         
+    if data_type == 'sentinel-2':
+        data, nodata_mask = load_and_normalize_sentinel_2_data(input_files[0])
+
     if data_type == 'planetscope':
         data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1])
+
+    return data, nodata_mask
+
+def load_and_normalize_sentinel_2_data(input_path):
+    dataset_s2 = r.open(input_path)
+    blue = dataset_s2.read(1)
+    green = dataset_s2.read(2)
+    red = dataset_s2.read(3)
+    nir = dataset_s2.read(4)
+    swir16 = dataset_s2.read(5)
+    swir22 = dataset_s2.read(6)
+
+    nodata_mask = blue==0
+
+    data = np.stack([blue, green, red, nir, swir16, swir22]).astype(np.float32)
 
     return data, nodata_mask
 
