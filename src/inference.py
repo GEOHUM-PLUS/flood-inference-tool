@@ -1,4 +1,6 @@
 import os
+import re
+import glob
 import pickle
 import torch
 import torch.nn as nn
@@ -8,6 +10,7 @@ from threading import Thread
 from skimage.morphology import area_opening, area_closing
 import warnings
 import rasterio as r
+from rasterio.enums import Resampling
 import time
 import tkinter as tk
 
@@ -220,8 +223,9 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
     
     # saving final result
     with r.Env():
-        profile = r.open(input_info['input_files'][0]).profile
+        profile = r.open(resolve_profile_reference_path(input_info)).profile
         profile.update(
+            driver='GTiff',
             dtype=r.uint8 if not bayesian_dropout else r.float32,
             count=1 if not bayesian_dropout else 2,
             nodata=0 if not bayesian_dropout else None,
@@ -280,7 +284,19 @@ def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=Fals
 
     return data, nodata_mask
 
+SENTINEL_2_BAND_IDS = {
+    'blue': 'B02',
+    'green': 'B03',
+    'red': 'B04',
+    'nir': 'B08',
+    'swir16': 'B11',
+    'swir22': 'B12'
+}
+
 def load_and_normalize_sentinel_2_data(input_path):
+    if os.path.isdir(input_path):
+        return load_and_normalize_sentinel_2_safe_folder(input_path)
+
     dataset_s2 = r.open(input_path)
     blue = dataset_s2.read(1)
     green = dataset_s2.read(2)
@@ -292,6 +308,45 @@ def load_and_normalize_sentinel_2_data(input_path):
     nodata_mask = blue==0
 
     data = np.stack([blue, green, red, nir, swir16, swir22]).astype(np.float32)
+
+    return data, nodata_mask
+
+def resolve_profile_reference_path(input_info):
+    '''Picks the file used as the georeferencing template for the output raster.'''
+    path = input_info['input_files'][0]
+    if input_info['data_type']=='sentinel-2' and os.path.isdir(path):
+        return find_sentinel_2_band_path(path, SENTINEL_2_BAND_IDS['blue'])
+    return path
+
+def find_sentinel_2_band_path(safe_folder, band_id):
+    '''Finds a band's .jp2 file inside a Sentinel-2 .SAFE product, picking the finest resolution available if more than one copy exists (e.g. B02 under both R10m and R20m).'''
+    matches = glob.glob(os.path.join(safe_folder, '**', f'*_{band_id}_*.jp2'), recursive=True)
+    if not matches:
+        matches = glob.glob(os.path.join(safe_folder, '**', f'*_{band_id}.jp2'), recursive=True)
+    if not matches:
+        raise IOError(f'Could not find band {band_id} inside "{safe_folder}".')
+
+    def resolution_of(path):
+        match = re.search(r'(\d+)m', os.path.basename(path))
+        return int(match.group(1)) if match else 0
+
+    matches.sort(key=resolution_of)
+    return matches[0]
+
+def load_and_normalize_sentinel_2_safe_folder(safe_folder):
+    band_order = ['blue', 'green', 'red', 'nir', 'swir16', 'swir22']
+    band_paths = [find_sentinel_2_band_path(safe_folder, SENTINEL_2_BAND_IDS[name]) for name in band_order]
+
+    with r.open(band_paths[0]) as ref:
+        ref_shape = (ref.height, ref.width)
+
+    bands = []
+    for path in band_paths:
+        with r.open(path) as dataset:
+            bands.append(dataset.read(1, out_shape=ref_shape, resampling=Resampling.bilinear))
+
+    data = np.stack(bands).astype(np.float32)
+    nodata_mask = data[0]==0
 
     return data, nodata_mask
 

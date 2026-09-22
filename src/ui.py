@@ -44,9 +44,10 @@ def build_ui():
     build_data_tab(
         frame,
         data_type='sentinel-2',
-        input_labels=['Input file:'],
+        input_labels=['Input file or .SAFE folder:'],
         models=MODEL_OPTIONS['sentinel-2'],
-        show_dB_checkbox=False
+        show_dB_checkbox=False,
+        input_is_folder=True
     )
 
     frame = ttk.Frame(notebook)
@@ -65,8 +66,8 @@ def build_ui():
 
     window.mainloop()
 
-def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox):
-    input_vars = [add_file_row(window, label) for label in input_labels]
+def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, input_is_folder=False):
+    input_vars = [add_file_row(window, label, folder=input_is_folder) for label in input_labels]
 
     sar_is_dB = add_checkbox_row(window, 'SAR data is in dB') if show_dB_checkbox else None
 
@@ -104,7 +105,7 @@ def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox):
     progressbar = ttk.Progressbar(window, length=500, maximum=100)
     progressbar.pack()
 
-def add_file_row(window, label_text, save=False):
+def add_file_row(window, label_text, save=False, folder=False):
     frame_label = tk.Frame(window)
     frame_entry = tk.Frame(window)
     tk.Label(text=label_text, master=frame_label).pack(side=tk.LEFT)
@@ -113,7 +114,7 @@ def add_file_row(window, label_text, save=False):
     entry = tk.Entry(master=frame_entry, width=50, textvariable=path_var)
     entry.pack(side=tk.LEFT)
 
-    browse = create_file_path if save else get_file_path
+    browse = get_folder_path if folder else create_file_path if save else get_file_path
     tk.Button(master=frame_entry, text='...', command=lambda: browse(entry)).pack(side=tk.LEFT)
 
     frame_label.pack(fill=tk.X)
@@ -149,6 +150,12 @@ def get_file_path(entry):
     if file:
         entry.delete(0, tk.END)
         entry.insert(0, file)
+
+def get_folder_path(entry):
+    folder = filedialog.askdirectory()
+    if folder:
+        entry.delete(0, tk.END)
+        entry.insert(0, folder)
 
 def create_file_path(entry):
     file = filedialog.asksaveasfilename(filetypes=[('TIF', '*.tif')])

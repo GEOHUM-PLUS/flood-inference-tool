@@ -12,7 +12,7 @@ if __name__=='__main__':
     parser.add_argument('-ui', '--ui-mode', action='store_true', help='Activate UI mode. Ignores all other options given.')
 
     parser.add_argument('-i_s1', '--input_file_sentinel_1', nargs='+', type=str, help='The path to the input image from Sentinel-1. Bands VH and VV bands (in this order).')
-    parser.add_argument('-i_s2', '--input_file_sentinel_2', nargs='+', type=str, help='The path to the input image from Sentinel-2. Bands blue, green, red, nir, swir16, and swir22 (in this order).')
+    parser.add_argument('-i_s2', '--input_file_sentinel_2', nargs='+', type=str, help='The path to the input image from Sentinel-2, or a Sentinel-2 .SAFE product folder. If a single image file, bands blue, green, red, nir, swir16, and swir22 (in this order).')
     parser.add_argument('-i_ps', '--input_files_planetscope', nargs='+', type=str, help='The paths to the input images from PlanetScope. Image 1: bands BGRN (in this order), Image 2: Aux with cloud mask.')
 
     parser.add_argument('-o', '--output-path', type=str, help='The path to the final result.')
