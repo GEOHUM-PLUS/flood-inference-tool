@@ -51,7 +51,7 @@ class CanvasImageOverlay:
         self.pil_image = pil_image
         self.photo_image = None
         self.canvas_image_id = None
-        self.last_size = None
+        self.last_render_key = None
         self.deleted = False
 
         map_widget.canvas_polygon_list.append(self)
@@ -74,20 +74,42 @@ class CanvasImageOverlay:
         x0, y0 = self.canvas_pos(max_lat, min_lon, widget_tile_width, widget_tile_height)
         x1, y1 = self.canvas_pos(min_lat, max_lon, widget_tile_width, widget_tile_height)
 
-        size = (max(1, round(x1 - x0)), max(1, round(y1 - y0)))
-        if size != self.last_size:
-            self.photo_image = ImageTk.PhotoImage(self.pil_image.resize(size, Image.Resampling.LANCZOS))
-            self.last_size = size
+        # only render the part of the image inside the viewport: when zoomed in far, the
+        # full on-screen size can be enormous (gigapixels) and exhaust memory
+        vis_x0, vis_y0 = max(x0, 0), max(y0, 0)
+        vis_x1, vis_y1 = min(x1, self.map_widget.width), min(y1, self.map_widget.height)
+        dest_size = (round(vis_x1 - vis_x0), round(vis_y1 - vis_y0))
+
+        if dest_size[0] < 1 or dest_size[1] < 1 or x1 <= x0 or y1 <= y0:
+            self.hide()
+            return
+
+        img_w, img_h = self.pil_image.size
+        crop_box = (
+            (vis_x0 - x0) / (x1 - x0) * img_w, (vis_y0 - y0) / (y1 - y0) * img_h,
+            (vis_x1 - x0) / (x1 - x0) * img_w, (vis_y1 - y0) / (y1 - y0) * img_h,
+        )
+
+        render_key = (dest_size, crop_box)
+        if render_key != self.last_render_key:
+            self.photo_image = ImageTk.PhotoImage(self.pil_image.resize(dest_size, Image.Resampling.BILINEAR, box=crop_box))
+            self.last_render_key = render_key
             if self.canvas_image_id is not None:
                 self.map_widget.canvas.delete(self.canvas_image_id)
                 self.canvas_image_id = None
 
         if self.canvas_image_id is None:
-            self.canvas_image_id = self.map_widget.canvas.create_image(x0, y0, image=self.photo_image, anchor='nw', tags='thumbnail_preview')
+            self.canvas_image_id = self.map_widget.canvas.create_image(vis_x0, vis_y0, image=self.photo_image, anchor='nw', tags='thumbnail_preview')
         else:
-            self.map_widget.canvas.coords(self.canvas_image_id, x0, y0)
+            self.map_widget.canvas.coords(self.canvas_image_id, vis_x0, vis_y0)
 
         self.map_widget.manage_z_order()
+
+    def hide(self):
+        if self.canvas_image_id is not None:
+            self.map_widget.canvas.delete(self.canvas_image_id)
+            self.canvas_image_id = None
+        self.last_render_key = None
 
     def delete(self):
         if self.canvas_image_id is not None:

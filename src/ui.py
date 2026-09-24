@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import torch
 
@@ -83,8 +83,13 @@ def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, in
 
     use_bayesian_dropout = add_checkbox_row(window, '(EXPERIMENTAL) Use Bayesian Dropout to estimate uncertainty')
     use_postprocess = add_checkbox_row(window, 'Remove noise from flood map')
+    show_plot = add_checkbox_row(window, 'Show plot of the results when finished')
 
     def run():
+        if var_model.get() not in models:
+            show_error('Please select a model before starting the processing.')
+            return
+
         input_info = {
             'input_files': [var.get() for var in input_vars],
             'data_type': data_type,
@@ -101,7 +106,8 @@ def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, in
             pb=progressbar,
             device=var_device.get(),
             bt_run=button_run,
-            bayesian_dropout=use_bayesian_dropout.get()
+            bayesian_dropout=use_bayesian_dropout.get(),
+            show_plot=show_plot.get()
         )
 
     button_run = tk.Button(window, text='Start Processing', command=run)
@@ -119,8 +125,17 @@ def add_file_row(window, label_text, save=False, folder=False):
     entry = tk.Entry(master=frame_entry, width=50, textvariable=path_var)
     entry.pack(side=tk.LEFT)
 
-    browse = get_folder_path if folder else create_file_path if save else get_file_path
-    tk.Button(master=frame_entry, text='...', command=lambda: browse(entry)).pack(side=tk.LEFT)
+    if folder:
+        # one button that lets the user pick either a file or a folder
+        button = tk.Button(master=frame_entry, text='...')
+        menu = tk.Menu(button, tearoff=0)
+        menu.add_command(label='Select file...', command=lambda: get_file_path(entry))
+        menu.add_command(label='Select folder...', command=lambda: get_folder_path(entry))
+        button.config(command=lambda: menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height()))
+        button.pack(side=tk.LEFT)
+    else:
+        browse = create_file_path if save else get_file_path
+        tk.Button(master=frame_entry, text='...', command=lambda: browse(entry)).pack(side=tk.LEFT)
 
     frame_label.pack(fill=tk.X)
     frame_entry.pack(fill=tk.X)

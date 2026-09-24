@@ -18,7 +18,7 @@ from src.models import UNetSemanticSegmentation, UNetSemanticSegmentationS2
 from src.helpers import DataScaler, get_slope, get_points_and_distance_map, tile_cleaner
 
 def inference(model_path:str, input_info:dict, result_path:str, clean_result:bool=False, ui=None, device=torch.device('cpu'), 
-    bayesian_dropout:bool=False):
+    bayesian_dropout:bool=False, show_plot:bool=False):
     '''
     input_info should have the following keys:
         input_files:list
@@ -210,19 +210,14 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
 
             bayesian_dropout = False
             
-            inference, nodata_mask = apply_otsu_threshold(input_info['input_files'][0], sar_is_dB)
+            inference, nodata_mask = apply_otsu_threshold(input_info['input_files'][0], input_info.get('sar_is_dB', True))
 
     # clean small areas if necessary
     if clean_result:
         print('Post-processing end result...')
         if not ui is None:
             ui['button_run']["text"] = "Post-processing..."
-        # Otsu thresholding produces a binary {0: dry, 1: flood} map, while the
-        # neural-net models produce {0: unused/reserved, 1: dry, 2: flood}.
-        if model_path=='models/Otsu_Threshold':
-            inference = tile_cleaner(inference, 500, 16, foreground_val=1, background_val=0)
-        else:
-            inference = tile_cleaner(inference, 500, 16, foreground_val=2, background_val=1)
+        inference = tile_cleaner(inference, 500, 16, foreground_val=2, background_val=1)
     
     # setting no data correctly
     # inference += 1
@@ -252,13 +247,23 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
 
     if not ui is None:
         alert_finished(result_path, time_elapsed/60)
+        if show_plot:
+            # plotting must happen on the tkinter (main) thread, not this worker thread
+            ui['window'].after(0, lambda: show_results_plot(ui['window'], input_info, result_path))
         ui['button_run']['state'] = 'normal'
         ui['button_run']["text"] = "Start Processing"
 
 # TODO: Check if inputs are valid
 # TODO: Disable everything in the UI
+def show_results_plot(window, input_info, result_path):
+    try:
+        from src.plotter import plot_results
+        plot_results(input_info['input_files'][0], result_path, input_info['data_type'], parent=window)
+    except Exception as exc:
+        show_error(f'Could not plot the results: {exc}')
+
 def start_processing(model_name, input_info, output_path, post_processing=False, window=None, pb=None, 
-    device=None, bt_run=None, bayesian_dropout:bool=False):
+    device=None, bt_run=None, bayesian_dropout:bool=False, show_plot:bool=False):
 
     # if input_image_path and output_path:
     os.makedirs('images', exist_ok=True)
@@ -277,7 +282,8 @@ def start_processing(model_name, input_info, output_path, post_processing=False,
             post_processing, 
             None if window is None else {'window': window, 'progress_bar': pb, 'button_run': bt_run},
             device,
-            bayesian_dropout
+            bayesian_dropout,
+            show_plot
         )
     ).start()
 
@@ -419,7 +425,8 @@ def apply_otsu_threshold(input_path, data_is_in_dB):
         vh = 10*np.log10(vh)
     otsu_value = threshold_otsu(vh[~nodata_mask])
 
-    otsued_data = (vh<=otsu_value).astype(np.uint8)
+    # same labels as the neural-net models: 1 = dry, 2 = flood (0 is reserved for nodata)
+    otsued_data = (vh<=otsu_value).astype(np.uint8) + 1
     
     return otsued_data, nodata_mask
 
