@@ -148,6 +148,45 @@ class UNetSemanticSegmentationS2(nn.Module):
         skip4, skip3, skip2, skip1 = self.encoder(x)
         return self.decoder(skip4, skip3, skip2, skip1)
 
+def _wf2_double_conv(in_channels, out_channels):
+    return nn.Sequential(
+        nn.Conv2d(in_channels, out_channels, 3, padding=1),
+        nn.ReLU(inplace=True),
+        nn.Conv2d(out_channels, out_channels, 3, padding=1),
+        nn.ReLU(inplace=True)
+    )
+
+class UNetML4FloodsWF2(nn.Module):
+    '''
+    Matches the checkpoint layout of ml4floods' WF2_unetv2_bgriswirs model
+    (https://huggingface.co/isp-uv-es/ml4floods): 4 encoder levels, bilinear
+    upsampling, no batchnorm/dropout. Trained on Sentinel-2
+    blue/green/red/nir/swir16/swir22 bands (in this order), predicting 2
+    independent sigmoid outputs: cloud probability and water probability.
+    '''
+    def __init__(self, n_channels:int=6, n_class:int=2):
+        super().__init__()
+        self.dconv_down1 = _wf2_double_conv(n_channels, 64)
+        self.dconv_down2 = _wf2_double_conv(64, 128)
+        self.dconv_down3 = _wf2_double_conv(128, 256)
+        self.dconv_down4 = _wf2_double_conv(256, 512)
+        self.maxpool = nn.MaxPool2d(2)
+        self.dconv_up3 = _wf2_double_conv(256 + 512, 256)
+        self.dconv_up2 = _wf2_double_conv(128 + 256, 128)
+        self.dconv_up1 = _wf2_double_conv(128 + 64, 64)
+        self.conv_last = nn.Conv2d(64, n_class, 1)
+
+    def forward(self, x):
+        up = lambda t: nn.functional.interpolate(t, scale_factor=2, mode='bilinear', align_corners=True)
+        conv1 = self.dconv_down1(x)
+        conv2 = self.dconv_down2(self.maxpool(conv1))
+        conv3 = self.dconv_down3(self.maxpool(conv2))
+        x = self.dconv_down4(self.maxpool(conv3))
+        x = self.dconv_up3(torch.cat([up(x), conv3], dim=1))
+        x = self.dconv_up2(torch.cat([up(x), conv2], dim=1))
+        x = self.dconv_up1(torch.cat([up(x), conv1], dim=1))
+        return self.conv_last(x)
+
 if __name__=='__main__':
     # show model
     model = UNetSemanticSegmentation(in_channels=3, out_channels=2, base=16)

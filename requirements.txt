@@ -11,3 +11,4 @@ rioxarray
 scikit-image
 pillow
 tkintermapview
+huggingface_hub
