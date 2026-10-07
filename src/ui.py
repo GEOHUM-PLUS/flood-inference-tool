@@ -7,7 +7,7 @@ from src.inference import start_processing
 
 MODEL_OPTIONS = {
     'sentinel-1': ['UNet-S1.pt', 'DistanceMap.pt', 'Otsu_Threshold'],
-    'sentinel-2': ['UNet-S2.pt'],
+    'sentinel-2': ['UNet-S2.pt', 'WF2_unetv2_bgriswirs'],
     'planetscope': ['UNet-PlanetScope.pt'],
 }
 
