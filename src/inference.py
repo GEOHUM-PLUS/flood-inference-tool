@@ -249,7 +249,7 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
 def show_results_plot(window, input_info, result_path):
     try:
         from src.plotter import plot_results
-        plot_results(input_info['input_files'][0], result_path, input_info['data_type'], parent=window)
+        plot_results(input_info['input_files'][0], result_path, input_info['data_type'], parent=window, sar_is_dB=input_info.get('sar_is_dB', True))
     except Exception as exc:
         show_error(f'Could not plot the results: {exc}')
 

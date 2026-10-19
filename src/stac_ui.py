@@ -1,20 +1,26 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime
 import io
 import urllib.request
 
+import numpy as np
 from PIL import Image, ImageTk
 from tkintermapview import TkinterMapView
 from tkintermapview.utility_functions import decimal_to_osm
 
-from src.stac import search_sentinel_2, download_sentinel_2_window, search_sentinel_1, download_sentinel_1_window
+from src.stac import search_sentinel_2, download_sentinel_2_window, search_sentinel_1, download_sentinel_1_window, group_items_by_date
 
 DEFAULT_MAP_POSITION = (47.803, 13.035)
 DEFAULT_MAP_ZOOM = 5
 DEFAULT_SEARCH_WINDOW_DAYS = 30
 PREVIEW_ASSET_KEYS = ['rendered_preview', 'thumbnail', 'visual']
+# a date can have many same-date scenes (adjacent tiles/orbits); fetching their
+# preview thumbnails in parallel instead of one at a time keeps selecting a busy
+# date from taking tens of seconds
+PREVIEW_FETCH_WORKERS = 8
 
 STAC_DATA_TYPES = {
     'sentinel-2': {
@@ -34,7 +40,8 @@ STAC_DATA_TYPES = {
 def open_stac_search_window(parent, on_download, data_type='sentinel-2'):
     '''Opens a window to search Sentinel-1/Sentinel-2 scenes on Planetary Computer's STAC
     catalog by drawing a bounding box on a map, then download only that bbox's window of the
-    required bands for a chosen scene. on_download(output_path) is called once a download
+    required bands for a chosen date (mosaicking together all scenes found on that date, if
+    more than one covers the area). on_download(output_path) is called once a download
     finishes.'''
     StacSearchWindow(parent, on_download, data_type)
 
@@ -124,12 +131,13 @@ class StacSearchWindow:
         self.on_download = on_download
         self.type_config = STAC_DATA_TYPES[data_type]
         self.bbox = None
-        self.items = []
+        self.groups = []  # list of (date, items) tuples, one per result row
         self.drawing = False
         self.draw_start = None
         self.draw_rectangle_id = None
         self.bbox_polygon = None
-        self.preview_overlay = None
+        self.preview_overlays = []
+        self.preview_request_id = 0
 
         self.window = tk.Toplevel(parent)
         self.window.title(f'Search {self.type_config["title"]} (STAC)')
@@ -275,59 +283,84 @@ class StacSearchWindow:
         Thread(target=run_search, daemon=True).start()
 
     def search_failed(self, exc):
+        # the search window may have been closed while the background search was running
+        if not self.window.winfo_exists():
+            return
         self.search_button.config(state='normal', text='Search')
         messagebox.showerror('Search failed', str(exc))
 
     def search_done(self, items):
-        self.items = items
+        if not self.window.winfo_exists():
+            return
+        self.groups = group_items_by_date(items)
         self.search_button.config(state='normal', text='Search')
-        for item in items:
-            self.results_listbox.insert(tk.END, self.format_result_line(item))
+        for date, group_items in self.groups:
+            self.results_listbox.insert(tk.END, self.format_group_line(date, group_items))
         if not items:
             messagebox.showinfo('No results', f'No {self.type_config["title"]} scenes found for this area and date range.')
 
-    def format_result_line(self, item):
-        date_text = item.datetime.strftime('%Y-%m-%d %H:%M') if item.datetime else '?'
+    def format_group_line(self, date, group_items):
+        date_text = date.strftime('%Y-%m-%d')
+        scene_text = '1 scene ' if len(group_items)==1 else f'{len(group_items)} scenes'
         if self.type_config['show_cloud_cover']:
-            cloud_cover = item.properties.get('eo:cloud_cover', float('nan'))
-            return f'{date_text}  |  cloud cover: {cloud_cover:5.1f}%  |  {item.id}'
-        orbit = item.properties.get('sat:orbit_state', '?')
-        return f'{date_text}  |  orbit: {orbit:10s}  |  {item.id}'
+            cloud_cover = np.mean([item.properties.get('eo:cloud_cover', float('nan')) for item in group_items])
+            return f'{date_text}  |  {scene_text}  |  mean cloud cover: {cloud_cover:5.1f}%'
+        orbits = sorted({item.properties.get('sat:orbit_state', '?') for item in group_items})
+        return f'{date_text}  |  {scene_text}  |  orbit: {", ".join(orbits):10s}'
 
     def on_result_selected(self, event):
         selection = self.results_listbox.curselection()
         if not selection:
             return
-        item = self.items[selection[0]]
-        Thread(target=self.fetch_preview, args=(item,), daemon=True).start()
+        date, group_items = self.groups[selection[0]]
+        self.clear_preview()
+        self.preview_request_id += 1
+        Thread(target=self.fetch_previews, args=(group_items, self.preview_request_id), daemon=True).start()
 
-    def fetch_preview(self, item):
+    def fetch_previews(self, group_items, request_id):
+        '''
+        Fetches every scene's preview thumbnail in the selected date's group in
+        parallel (a date can have many same-date scenes from adjacent tiles/orbits,
+        and fetching them one at a time can take tens of seconds), adding each
+        overlay to the map as soon as it arrives rather than waiting for all of them.
+        '''
+        with ThreadPoolExecutor(max_workers=min(PREVIEW_FETCH_WORKERS, len(group_items))) as executor:
+            futures = [executor.submit(self.fetch_one_preview, item) for item in group_items]
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    bbox, pil_image = result
+                    self.window.after(0, lambda bbox=bbox, pil_image=pil_image, request_id=request_id: self.add_preview_overlay(bbox, pil_image, request_id))
+
+    def fetch_one_preview(self, item):
         preview_href = next((item.assets[key].href for key in PREVIEW_ASSET_KEYS if key in item.assets), None)
         if preview_href is None:
-            return
+            return None
         try:
             with urllib.request.urlopen(preview_href) as response:
                 image_bytes = response.read()
-            pil_image = Image.open(io.BytesIO(image_bytes)).convert('RGBA')
+            return item.bbox, Image.open(io.BytesIO(image_bytes)).convert('RGBA')
         except Exception:
-            return
-        self.window.after(0, lambda: self.show_preview(item.bbox, pil_image))
+            return None
 
-    def show_preview(self, bbox, pil_image):
-        self.clear_preview()
-        self.preview_overlay = CanvasImageOverlay(self.map_widget, bbox, pil_image)
+    def add_preview_overlay(self, bbox, pil_image, request_id):
+        # ignore results from a stale request (the user selected another row since, or
+        # the search window may have been closed while the background fetch was running)
+        if not self.window.winfo_exists() or request_id!=self.preview_request_id:
+            return
+        self.preview_overlays.append(CanvasImageOverlay(self.map_widget, bbox, pil_image))
 
     def clear_preview(self):
-        if self.preview_overlay is not None:
-            self.preview_overlay.delete()
-            self.preview_overlay = None
+        for overlay in self.preview_overlays:
+            overlay.delete()
+        self.preview_overlays = []
 
     def download_selected(self):
         selection = self.results_listbox.curselection()
         if not selection:
             messagebox.showerror('Error', 'Please select a scene from the results list first.')
             return
-        item = self.items[selection[0]]
+        date, group_items = self.groups[selection[0]]
 
         output_path = filedialog.asksaveasfilename(defaultextension='.tif', filetypes=[('TIF', '*.tif')])
         if not output_path:
@@ -343,7 +376,7 @@ class StacSearchWindow:
 
         def run_download():
             try:
-                download_fn(item, bbox, output_path, progress_callback=report_progress)
+                download_fn(group_items, bbox, output_path, progress_callback=report_progress)
             except Exception as exc:
                 self.window.after(0, lambda exc=exc: self.download_failed(exc))
                 return
@@ -352,15 +385,24 @@ class StacSearchWindow:
         Thread(target=run_download, daemon=True).start()
 
     def update_download_progress(self, done, total):
+        # the search window may have been closed while the background download was running
+        if not self.window.winfo_exists():
+            return
         self.download_progressbar['value'] = 100 * done / total
 
     def download_failed(self, exc):
+        if not self.window.winfo_exists():
+            return
         self.download_button.config(state='normal', text='Download Selected')
         self.download_progressbar['value'] = 0
         messagebox.showerror('Download failed', str(exc))
 
     def download_done(self, output_path):
-        self.download_button.config(state='normal', text='Download Selected')
+        # the search window may have been closed while the background download was running;
+        # the download itself still succeeded, so the result is still handed back
+        if self.window.winfo_exists():
+            self.download_button.config(state='normal', text='Download Selected')
         self.on_download(output_path)
         messagebox.showinfo('Download complete', f'Saved to:\n{output_path}')
-        self.window.destroy()
+        if self.window.winfo_exists():
+            self.window.destroy()
