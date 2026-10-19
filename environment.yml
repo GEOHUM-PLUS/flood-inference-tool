@@ -4,11 +4,18 @@ channels:
   - defaults
 dependencies:
   - python=3.12
-  - gdal
+  - pip
   - pip:
+      # CUDA 13.0 build of torch on Windows/Linux: NVIDIA GPUs from Turing
+      # (GTX 16 / RTX 20-series) to Blackwell (RTX 50-series), driver >= 580.
+      # Older GPUs (GTX 900/10-series, Titan V): use environment-legacy-gpu.yml.
+      # macOS has no wheels there and gets PyPI's build (MPS / CPU).
+      - --extra-index-url https://download.pytorch.org/whl/cu130
       - distance-map
       - geopandas
       - huggingface_hub
+      - matplotlib
+      - numpy
       - pillow
       - planetary-computer
       - pystac-client
@@ -17,5 +24,7 @@ dependencies:
       - scikit-image
       - shapely
       - tkintermapview
-      - torch
+      # pinned to a release that the index above has, so pip can't pick a newer
+      # (CPU-only on Windows) PyPI release instead
+      - torch==2.14.*
       - tqdm

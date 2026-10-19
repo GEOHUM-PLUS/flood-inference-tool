@@ -35,6 +35,8 @@ Then, use the following command to create an environment called ```flood_tool```
 conda env create -f environment.yml
 ```
 
+This installs a CUDA-enabled PyTorch on Windows and Linux for NVIDIA GPUs from the GTX 16 / RTX 20-series up to the RTX 50-series (driver 580 or newer). For older NVIDIA GPUs (GTX 900/10-series, Titan V), use `environment-legacy-gpu.yml` instead (it doesn't support the RTX 50-series). Both also work CPU-only, and on macOS.
+
 To activate the newly created environment, do:
 
 ```
