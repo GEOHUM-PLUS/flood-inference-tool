@@ -366,7 +366,16 @@ class PPM(nn.ModuleList):
             nn.Sequential(nn.AdaptiveAvgPool2d(scale), *_conv_bn_relu(in_channels, channels, 1)) for scale in pool_scales])
 
     def forward(self, x):
-        return [nn.functional.interpolate(ppm(x), size=x.shape[2:], mode='bilinear', align_corners=False) for ppm in self]
+        outs = []
+        for ppm in self:
+            pool, rest = ppm[0], ppm[1:]
+            # MPS's adaptive_avg_pool2d only supports input sizes evenly divisible
+            # by the output size (pytorch/pytorch#96056); x's spatial size here
+            # isn't guaranteed to divide evenly into every pool_scale, so run just
+            # this op on CPU when needed rather than requiring it of every input.
+            pooled = pool(x.cpu()).to(x.device) if x.device.type=='mps' else pool(x)
+            outs.append(nn.functional.interpolate(rest(pooled), size=x.shape[2:], mode='bilinear', align_corners=False))
+        return outs
 
 class DOFAv2UPerNet(nn.Module):
     '''
