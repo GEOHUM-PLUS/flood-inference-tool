@@ -1,0 +1,31 @@
+name: flood_tool
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # CUDA 12.6 build of torch on Windows/Linux, for older NVIDIA GPUs:
+      # Maxwell (GTX 900) to Hopper, incl. Pascal (GTX 10-series) and Volta
+      # (Titan V), driver >= 527 (Windows) / 525 (Linux). Doesn't support
+      # Blackwell (RTX 50-series): use environment.yml for those.
+      # torch 2.14 is the last release with CUDA 12.6 builds.
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - distance-map
+      - geopandas
+      - huggingface_hub
+      - matplotlib
+      - numpy
+      - pillow
+      - planetary-computer
+      - pystac-client
+      - rasterio
+      - rioxarray
+      - scikit-image
+      - shapely
+      - tkintermapview
+      # pinned to a release that the index above has, so pip can't pick a newer
+      # (CPU-only on Windows) PyPI release instead
+      - torch==2.14.*
+      - tqdm

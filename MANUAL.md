@@ -30,13 +30,21 @@ This manual explains how to install and use the Flood Inference Tool, a desktop 
    conda env create -f environment.yml
    ```
 
+   This installs a GPU-enabled (CUDA) PyTorch on Windows and Linux, which supports NVIDIA GPUs from the GTX 16 / RTX 20-series up to the RTX 50-series (NVIDIA driver 580 or newer). For an older NVIDIA GPU (e.g. GTX 900/10-series or Titan V), use the legacy file instead, which supports those GPUs (and up to the RTX 40-series, but not the RTX 50-series):
+
+   ```
+   conda env create -f environment-legacy-gpu.yml
+   ```
+
+   Both work without a GPU too (processing then runs on the CPU, selected with the Device option), and on macOS, where Apple Silicon GPUs are available as `mps`. To check whether your GPU is usable, run `python -c "import torch; print(torch.cuda.is_available())"` in the activated environment; it should print `True`.
+
 5. Activate it:
 
    ```
    conda activate flood_tool
    ```
 
-If this finishes without errors, the tool is ready to use. The model weight files for Sentinel-1, Sentinel-2 (`UNet-S2.pt`) and PlanetScope are included in the repository under `models/`. The `WF2_unetv2_bgriswirs` Sentinel-2 model is downloaded automatically the first time it is used (see [3.3](#33-sentinel-2-tab)) and cached locally afterwards, so that first run needs an internet connection and will take a little longer.
+If this finishes without errors, the tool is ready to use. The model weights aren't part of the repository: each model is downloaded automatically from [Hugging Face](https://huggingface.co/matosak/flood-inference-tool) the first time it is used (`WF2_unetv2_bgriswirs` comes from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) repository instead), and cached locally afterwards. So each model's first run needs an internet connection and takes a little longer, especially for the two DOFA models (about 580 MB each); later runs work offline.
 
 ## 2. Launching the tool
 
@@ -89,14 +97,17 @@ The window has three tabs — **Sentinel-1**, **Sentinel-2** and **PlanetScope**
   Click `...` to choose; it opens a small menu to pick either a file or a folder.
 - **Model**:
   - `UNet-S2.pt` — this project's own Sentinel-2 flood-mapping model.
-  - `WF2_unetv2_bgriswirs` — a model from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) project. Unlike the other models, it produces four classes rather than three, since it detects clouds itself (see [section 5](#5-understanding-the-output-file)). Its weights are downloaded automatically the first time it is selected.
+  - `WF2_unetv2_bgriswirs` — a model from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) project. Unlike the other models, it produces four classes rather than three, since it detects clouds itself (see [section 5](#5-understanding-the-output-file)). Like the other models, its weights are downloaded automatically the first time it is selected.
+  - `dofa_v2_base_seg_upernet_s2.pt` — a DOFA v2 foundation-model encoder with a UPerNet decoder, trained with the DOFA-transferability project on Sen1Floods11 (weak labels, then hand labels). It uses only the blue, green, red and NIR bands (B2, B3, B4, B8). It reached a water IoU of 82.7 on the Sen1Floods11 test set, and 39–52 on the FloodPlanet evaluation, where it was precise (94–99%) but missed part of the water. It is a large model, so it runs much faster on a GPU (`cuda`) than on the CPU.
 - There is no dB option on this tab (it does not apply to optical imagery).
 
 ### 3.4 PlanetScope tab
 
-- **Input file**: a 4-band PlanetScope image with bands named `blue`, `green`, `red`, `nir` (band order inside the file does not matter, as long as they are named).
-- **Input auxiliary file**: a single-band raster where 0 marks pixels to exclude (e.g. clouds or no-data areas) — this is used as the no-data/cloud mask for the result.
-- **Model**: only `UNet-PlanetScope.pt` is currently available.
+- **Input file**: a PlanetScope image with bands named `blue`, `green`, `red`, `nir` (band order inside the file does not matter, as long as they are named; other bands, such as the extra bands of an 8-band SuperDove product, are ignored).
+- **Input auxiliary file**: a raster whose first band is 0 for pixels to exclude (e.g. clouds or no-data areas) — this is used as the no-data/cloud mask for the result. Planet's `udm2` file works as-is, since its first band is the "clear" mask.
+- **Model**:
+  - `UNet-PlanetScope.pt` — this project's own PlanetScope model.
+  - `dofa_v2_base_seg_upernet_PS.pt` — the DOFA v2 + UPerNet Sentinel-2 model described in [3.3](#33-sentinel-2-tab), further fine-tuned on FloodPlanet PlanetScope imagery (water IoU 67–70 on the FloodPlanet evaluation). Like that model, it runs much faster on a GPU. That imagery is a contrast-stretched 8-bit version of PlanetScope, so the tool stretches your image the same way first: the 1st–99th percentile range of the scene's valid pixels, shared by all four bands, becomes 0–255. Any PlanetScope product works, e.g. surface reflectance, regardless of its units. Since the stretch depends on the scene's contents, a scene that is almost entirely water or almost entirely bright (e.g. very cloudy, with clouds not masked) can give less reliable results.
 - This tab has no STAC search button, since PlanetScope imagery isn't published on the public STAC catalogs this tool searches.
 
 ## 4. Searching and downloading imagery online
@@ -118,7 +129,7 @@ The output is a GeoTIFF with the same geographic footprint as the input. Its fir
 
 | Model(s)                                   | 0        | 1    | 2     | 3     |
 |---------------------------------------------|----------|------|-------|-------|
-| `UNet-S1.pt`, `UNet-S2.pt`, `DistanceMap.pt`, `UNet-PlanetScope.pt`, `Otsu_Threshold` | no data | dry  | flood/water | — |
+| `UNet-S1.pt`, `UNet-S2.pt`, `DistanceMap.pt`, `UNet-PlanetScope.pt`, `dofa_v2_base_seg_upernet_s2.pt`, `dofa_v2_base_seg_upernet_PS.pt`, `Otsu_Threshold` | no data | dry  | flood/water | — |
 | `WF2_unetv2_bgriswirs`                      | no data | land | water | cloud |
 
 If **Bayesian Dropout** was enabled, the file instead has two floating-point bands: the first is the model's prediction (same meaning as above) and the second is a per-pixel uncertainty estimate (higher values mean the model was less confident at that pixel).

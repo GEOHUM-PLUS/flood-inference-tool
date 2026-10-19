@@ -1,7 +1,6 @@
 import os
 import re
 import glob
-import pickle
 import xml.etree.ElementTree as ET
 import torch
 import torch.nn as nn
@@ -15,7 +14,7 @@ from rasterio.enums import Resampling
 import time
 import tkinter as tk
 
-from src.models import UNetSemanticSegmentation, UNetSemanticSegmentationS2
+from src.models import UNetSemanticSegmentation, UNetSemanticSegmentationS2, DOFAv2UPerNet
 from src.helpers import DataScaler, get_slope, get_points_and_distance_map, tile_cleaner
 
 def inference(model_path:str, input_info:dict, result_path:str, clean_result:bool=False, ui=None, device=torch.device('cpu'), 
@@ -36,14 +35,10 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
 
     # if it is a model that rely on neural networks...
     if not model_path in ('models/Otsu_Threshold', 'models/WF2_unetv2_bgriswirs'):
-        # innitially load the model weights
-        try:
-            model_data = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
-        except pickle.UnpicklingError:
-            # some checkpoints (e.g. UNet-S2.pt) store extra numpy-typed training
-            # metadata (loss curves) that the safe unpickler rejects; model files
-            # under models/ are trusted local input to this tool.
-            model_data = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
+        # innitially load the model weights (downloaded on first use)
+        if not ui is None:
+            ui['button_run']["text"] = "Downloading model weights..."
+        model_data = load_model_file(os.path.basename(model_path))
 
         # load model for inference
         match model_path:
@@ -53,6 +48,10 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
                 model = UNetSemanticSegmentation(in_channels=4, out_channels=2, base=32).to(device)
             case 'models/UNet-PlanetScope.pt':
                 model = UNetSemanticSegmentation(in_channels=4, out_channels=2, base=32).to(device)
+            case 'models/dofa_v2_base_seg_upernet_PS.pt' | 'models/dofa_v2_base_seg_upernet_s2.pt':
+                if input_info['data_type']!=DOFA_MODEL_DATA_TYPES[model_path]:
+                    raise IOError(f'Unsuitable data type for {os.path.basename(model_path)}.')
+                model = DOFAv2UPerNet(wavelengths=DOFA_INPUTS[input_info['data_type']]['wavelengths']).to(device)
             case 'models/UNet-S2.pt':
                 model = UNetSemanticSegmentationS2(in_channels=6, out_channels=3, base=64).to(device)
                 # this checkpoint was saved without the tiling metadata the other
@@ -81,6 +80,8 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
             sar_data_is_in_dB = input_info['sar_is_dB'] if 'sar_is_dB' in input_info.keys() else True,
             processing_type = model_data['data_preprocessing']
         )
+        if model_data['data_preprocessing']=='dofa':
+            dataset = normalize_for_dofa(dataset, nodata_mask, input_info['data_type'])
         dataset = np.stack([np.pad(dataset[i], pad_width=model_data['chip_border'], mode='reflect') for i in range(len(dataset))])
 
         # getting terrain slope
@@ -278,6 +279,22 @@ def start_processing(model_name, input_info, output_path, post_processing=False,
         )
     ).start()
 
+# This tool's model weights are hosted on Hugging Face, and downloaded into the
+# local Hugging Face cache the first time each model is used. Pinned to a
+# commit, so a later change to the hosted files can't silently change results.
+MODELS_REPO_ID = 'matosak/flood-inference-tool'
+MODELS_REVISION = '02e6720f5c2e07220371fd0871528abc16f77cc8'
+
+def load_model_file(filename):
+    from huggingface_hub import hf_hub_download
+
+    weights_path = hf_hub_download(repo_id=MODELS_REPO_ID, filename=filename, revision=MODELS_REVISION)
+    # UNet-S2.pt also stores its training loss curves as numpy scalars, which
+    # the safe unpickler only accepts once allowlisted.
+    numpy_core = getattr(np, '_core', None) or np.core
+    with torch.serialization.safe_globals([numpy_core.multiarray.scalar, np.dtype, np.dtypes.Float64DType]):
+        return torch.load(weights_path, map_location=torch.device('cpu'), weights_only=True)
+
 def build_tile_batches(height, width, chip_size, chip_border, nodata_mask, batch_size=8):
     '''
     Splits a (height, width) raster into overlapping chip_size x chip_size tiles
@@ -314,7 +331,10 @@ def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=Fals
         data, nodata_mask = load_and_normalize_sentinel_2_data(input_files[0])
 
     if data_type == 'planetscope':
-        data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1])
+        if processing_type == 'dofa':
+            data, nodata_mask = load_planetscope_data(input_files[0], input_files[1])
+        else:
+            data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1])
 
     return data, nodata_mask
 
@@ -421,7 +441,8 @@ def load_and_normalize_sentinel_2_safe_folder(safe_folder):
 
     return data, nodata_mask
 
-def load_and_normalize_planetscope_data(input_path, input_path_aux):
+def load_planetscope_data(input_path, input_path_aux):
+    '''Reads the blue/green/red/nir bands (found by band name) as-is, and the nodata/cloud mask (0 in the auxiliary file).'''
     input_dataset = r.open(input_path)
     data = np.stack([
         input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='blue')+1)),
@@ -432,10 +453,62 @@ def load_and_normalize_planetscope_data(input_path, input_path_aux):
 
     nodata_mask = r.open(input_path_aux).read(1)==0
 
+    return data, nodata_mask
+
+def load_and_normalize_planetscope_data(input_path, input_path_aux):
+    data, nodata_mask = load_planetscope_data(input_path, input_path_aux)
+
     for i in range(4):
         data[i] = (data[i]-np.mean(data[i, ~nodata_mask]))/np.std(data[i, ~nodata_mask])
     
     return data, nodata_mask
+
+# DOFA v2 + UPerNet models trained with DOFA-transferability (S2 RGBN band set),
+# one checkpoint per sensor:
+#   dofa_v2_base_seg_upernet_s2.pt: after the Sen1Floods11 hand-label stage.
+#   dofa_v2_base_seg_upernet_PS.pt: that model further fine-tuned on FloodPlanet PlanetScope.
+DOFA_MODEL_DATA_TYPES = {
+    'models/dofa_v2_base_seg_upernet_s2.pt': 'sentinel-2',
+    'models/dofa_v2_base_seg_upernet_PS.pt': 'planetscope',
+}
+
+# Inputs of the DOFA models. DOFA builds its patch embedding from the band
+# centre wavelengths (micrometres); values mirror the models' training configs:
+#   sentinel-2: blue/green/red/nir = B2/B3/B4/B8 with their training wavelengths,
+#     normalised with the Sen1Floods11 statistics of those bands (S2 x 10000).
+#   planetscope: the wavelengths it was fine-tuned with (Dove Classic centres).
+#     It was fine-tuned on FloodPlanet's "modified 8-bit" PlanetScope, which is
+#     contrast-stretched scene by scene (no fixed reflectance scale), so any
+#     PlanetScope input is first stretched to 0-255 between its 1st and 99th
+#     percentiles, one range shared by all four bands (per-band stretching or
+#     standardisation removes the NIR-vs-visible contrast that marks water, and
+#     misses obvious rivers), then normalised with FloodPlanet's statistics.
+DOFA_INPUTS = {
+    'sentinel-2': {
+        'wavelengths': [0.49, 0.56, 0.665, 0.832],
+        'mean': [1396.03470631, 1364.06118417, 1218.22847919, 2622.95796892],
+        'std': [739.09452682, 735.2482388, 864.936695, 1022.63418007],
+    },
+    'planetscope': {
+        'wavelengths': [0.485, 0.545, 0.63, 0.82],
+        'stretch_percentiles': (1, 99),
+        'mean': [40.8046, 54.7752, 49.7821, 85.1345],
+        'std': [43.7988, 53.6077, 50.2921, 50.5959],
+    },
+}
+
+def normalize_for_dofa(dataset, nodata_mask, data_type):
+    '''Selects and normalises the blue/green/red/nir bands the DOFA model expects; nodata pixels become 0.'''
+    dataset = dataset[:4].astype(np.float32)
+    if data_type=='planetscope':
+        low, high = np.percentile(dataset[:, ~nodata_mask], DOFA_INPUTS[data_type]['stretch_percentiles'])
+        dataset = np.clip((dataset-low)/(high-low)*255, 0, 255)
+
+    mean = np.asarray(DOFA_INPUTS[data_type]['mean'], dtype=np.float32)[:,None,None]
+    std = np.asarray(DOFA_INPUTS[data_type]['std'], dtype=np.float32)[:,None,None]
+    dataset = ((dataset-mean)/std).astype(np.float32)
+    dataset[:, nodata_mask] = 0
+    return dataset
 
 def load_and_normalize_sentinel_1_data(path_input_image, data_is_in_dB:bool=False, processing_type:str='normalize'):
     dataset_sar = r.open(path_input_image)
