@@ -8,6 +8,7 @@ dependencies:
   - pip:
       - distance-map
       - geopandas
+      - huggingface_hub
       - pillow
       - planetary-computer
       - pystac-client
