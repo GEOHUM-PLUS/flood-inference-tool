@@ -71,10 +71,10 @@ def build_ui():
 def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, input_is_folder=False, stac_search=False):
     input_vars = [add_file_row(window, label, folder=input_is_folder) for label in input_labels]
 
-    if stac_search:
-        add_stac_search_row(window, input_vars[0], data_type)
-
     sar_is_dB = add_checkbox_row(window, 'SAR data is in dB') if show_dB_checkbox else None
+
+    if stac_search:
+        add_stac_search_row(window, input_vars[0], data_type, sar_is_dB)
 
     output_path = add_file_row(window, 'Output file:', save=True)
 
@@ -147,18 +147,25 @@ STAC_SEARCH_LABELS = {
     'sentinel-2': 'Search Sentinel-2 via STAC...',
 }
 
-def add_stac_search_row(window, target_path_var, data_type):
+def add_stac_search_row(window, target_path_var, data_type, sar_is_dB_var=None):
     frame = tk.Frame(window)
-    tk.Button(master=frame, text=STAC_SEARCH_LABELS[data_type], command=lambda: launch_stac_search(window, target_path_var, data_type)).pack(side=tk.LEFT)
+    tk.Button(master=frame, text=STAC_SEARCH_LABELS[data_type], command=lambda: launch_stac_search(window, target_path_var, data_type, sar_is_dB_var)).pack(side=tk.LEFT)
     frame.pack(fill=tk.X)
 
-def launch_stac_search(parent, target_path_var, data_type):
+def launch_stac_search(parent, target_path_var, data_type, sar_is_dB_var=None):
     try:
         from src.stac_ui import open_stac_search_window
     except ImportError as exc:
         tk.messagebox.showerror(title='Missing dependency', message=f'STAC search requires the "tkintermapview" package to be installed.\n\n{exc}')
         return
-    open_stac_search_window(parent, on_download=target_path_var.set, data_type=data_type)
+
+    def on_download(path):
+        target_path_var.set(path)
+        if sar_is_dB_var is not None:
+            # downloaded Sentinel-1 scenes are saved in dB (see download_sentinel_1_window)
+            sar_is_dB_var.set(True)
+
+    open_stac_search_window(parent, on_download=on_download, data_type=data_type)
 
 def add_checkbox_row(window, text, default=False):
     frame = tk.Frame(window)
