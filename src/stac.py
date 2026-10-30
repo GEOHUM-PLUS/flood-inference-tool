@@ -187,7 +187,8 @@ def download_sentinel_1_window(items, bbox, output_path, progress_callback=None)
     assets (only the needed pixels are fetched, not the full scenes), mosaicking them
     together if more than one item is given (e.g. adjacent orbits/frames from the same
     date), and writes the result as a single local GeoTIFF (VH first, then VV, as
-    linear-scale backscatter) compatible with the tool's Sentinel-1 input.
+    dB-scale backscatter) compatible with the tool's Sentinel-1 input, with the
+    "SAR data is in dB" option checked.
 
     progress_callback(bands_done, bands_total), if given, is called after each
     item/band combination finishes downloading.
@@ -204,7 +205,15 @@ def download_sentinel_1_window(items, bbox, output_path, progress_callback=None)
         if progress_callback:
             progress_callback(bands_done, bands_total)
 
+    # the source assets are linear-scale; compositing above relies on 0 meaning
+    # "no data" (a real dB value can legitimately be 0, so that must happen before
+    # converting), and the final file keeps that same nodata=0 convention after
+    # conversion rather than leaving nodata pixels as -inf
     data = np.stack(bands).astype(np.float32)
+    nodata_mask = data==0
+    with np.errstate(divide='ignore'):
+        data = 10*np.log10(data)
+    data[nodata_mask] = 0
 
     profile = {
         'driver': 'GTiff',

@@ -143,6 +143,9 @@ class StacSearchWindow:
         self.window.title(f'Search {self.type_config["title"]} (STAC)')
 
         self.map_widget = TkinterMapView(self.window, width=760, height=480, corner_radius=0)
+        # the default OpenStreetMap tile server started returning 403 (access blocked);
+        # Esri's World Street Map is free to use and needs no API key
+        self.map_widget.set_tile_server('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', max_zoom=19)
         self.map_widget.set_position(*DEFAULT_MAP_POSITION)
         self.map_widget.set_zoom(DEFAULT_MAP_ZOOM)
         self.map_widget.pack(fill=tk.BOTH, expand=True)
