@@ -44,7 +44,7 @@ This manual explains how to install and use the Flood Inference Tool, a desktop 
    conda activate flood_tool
    ```
 
-If this finishes without errors, the tool is ready to use. The model weights aren't part of the repository: each model is downloaded automatically from [Hugging Face](https://huggingface.co/matosak/flood-inference-tool) the first time it is used (`WF2_unetv2_bgriswirs` comes from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) repository instead), and cached locally afterwards. So each model's first run needs an internet connection and takes a little longer, especially for the two DOFA models (about 580 MB each); later runs work offline.
+If this finishes without errors, the tool is ready to use. The model weights aren't part of the repository: each model is downloaded automatically from [Hugging Face](https://huggingface.co/matosak/flood-inference-tool) the first time it is used (`WF2_unetv2_bgriswirs` comes from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) repository instead), and saved in the repository's `models/` folder. Deleting that folder just makes the tool download the models again. So each model's first run needs an internet connection and takes a little longer, especially for the two DOFA models (about 580 MB each); later runs work offline.
 
 ## 2. Launching the tool
 
@@ -91,7 +91,7 @@ The window has three tabs — **Sentinel-1**, **Sentinel-2** and **PlanetScope**
 ### 3.3 Sentinel-2 tab
 
 - **Input file or .SAFE folder**: either
-  - a single GeoTIFF with 6 bands, in order **blue, green, red, nir, swir16, swir22**, with an optional 7th band carrying Sentinel-2's Scene Classification Layer (SCL) — if present, cloud and cloud-shadow pixels are automatically masked out of the result; or
+  - a single GeoTIFF with 6 bands, in order **blue, green, red, nir, swir16, swir22**, with an optional 7th band carrying Sentinel-2's Scene Classification Layer (SCL) — if present, cloud and cloud-shadow pixels can be masked out of the result (see **Mask clouds** below); or
   - a Sentinel-2 Level-2A `.SAFE` product folder (as distributed by Copernicus), from which the required bands — and the SCL cloud mask — are read automatically, at their native resolution.
 
   Click `...` to choose; it opens a small menu to pick either a file or a folder.
@@ -99,12 +99,14 @@ The window has three tabs — **Sentinel-1**, **Sentinel-2** and **PlanetScope**
   - `UNet-S2.pt` — this project's own Sentinel-2 flood-mapping model.
   - `WF2_unetv2_bgriswirs` — a model from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) project. Unlike the other models, it produces four classes rather than three, since it detects clouds itself (see [section 5](#5-understanding-the-output-file)). Like the other models, its weights are downloaded automatically the first time it is selected.
   - `dofa_v2_base_seg_upernet_s2.pt` — a DOFA v2 foundation-model encoder with a UPerNet decoder, trained with the DOFA-transferability project on Sen1Floods11 (weak labels, then hand labels). It uses only the blue, green, red and NIR bands (B2, B3, B4, B8). It reached a water IoU of 82.7 on the Sen1Floods11 test set, and 39–52 on the FloodPlanet evaluation, where it was precise (94–99%) but missed part of the water. It is a large model, so it runs much faster on a GPU (`cuda`) than on the CPU.
+- **Mask clouds (using the SCL band, when present)**: checked by default. Pixels the SCL band flags as cloud shadow, medium-probability cloud or high-probability cloud are excluded from processing and set to no data (`0`) in the result. Uncheck it to classify those pixels too, e.g. when the SCL flags water or bright areas as cloud by mistake. Without an SCL band (a 6-band file), there is nothing to mask either way. `WF2_unetv2_bgriswirs` still predicts its own cloud class with this unchecked.
 - There is no dB option on this tab (it does not apply to optical imagery).
 
 ### 3.4 PlanetScope tab
 
 - **Input file**: a PlanetScope image with bands named `blue`, `green`, `red`, `nir` (band order inside the file does not matter, as long as they are named; other bands, such as the extra bands of an 8-band SuperDove product, are ignored).
-- **Input auxiliary file**: a raster whose first band is 0 for pixels to exclude (e.g. clouds or no-data areas) — this is used as the no-data/cloud mask for the result. Planet's `udm2` file works as-is, since its first band is the "clear" mask.
+- **Input auxiliary file**: a raster whose first band is 0 for pixels to exclude (e.g. clouds) — this is used as the cloud mask for the result. Planet's `udm2` file works as-is, since its first band is the "clear" mask (0 for cloud, cloud shadow, haze or snow).
+- **Mask clouds (using the auxiliary file)**: checked by default. Pixels that are 0 in the auxiliary file are excluded from processing and set to no data (`0`) in the result. Uncheck it to classify them too. Either way, pixels outside the image (0 in all four bands) are no data.
 - **Model**:
   - `UNet-PlanetScope.pt` — this project's own PlanetScope model.
   - `dofa_v2_base_seg_upernet_PS.pt` — the DOFA v2 + UPerNet Sentinel-2 model described in [3.3](#33-sentinel-2-tab), further fine-tuned on FloodPlanet PlanetScope imagery (water IoU 67–70 on the FloodPlanet evaluation). Like that model, it runs much faster on a GPU. That imagery is a contrast-stretched 8-bit version of PlanetScope, so the tool stretches your image the same way first: the 1st–99th percentile range of the scene's valid pixels, shared by all four bands, becomes 0–255. Any PlanetScope product works, e.g. surface reflectance, regardless of its units. Since the stretch depends on the scene's contents, a scene that is almost entirely water or almost entirely bright (e.g. very cloudy, with clouds not masked) can give less reliable results.
@@ -125,7 +127,7 @@ The Sentinel-1 and Sentinel-2 tabs each have a **"Search Sentinel-1/2 via STAC..
 
 ## 5. Understanding the output file
 
-The output is a GeoTIFF with the same geographic footprint as the input. Its first (and, usually, only) band holds the classification, with `0` always meaning "no data" (outside the image's valid coverage, or masked out as cloud/cloud shadow for Sentinel-2):
+The output is a GeoTIFF with the same geographic footprint as the input. Its first (and, usually, only) band holds the classification, with `0` always meaning "no data" (outside the image's valid coverage, or masked out as cloud when **Mask clouds** is checked):
 
 | Model(s)                                   | 0        | 1    | 2     | 3     |
 |---------------------------------------------|----------|------|-------|-------|
@@ -142,7 +144,7 @@ For scripting or batch processing, the tool can be run without `-ui`:
 
 ```
 usage: flood-inference-tool.py [-h] [-ui] [-i_s1 INPUT ...] [-i_s2 INPUT ...] [-i_ps INPUT INPUT]
-                                [-o OUTPUT_PATH] [-pp] [-d DEVICE] [-m MODEL] [-dB] [-bd]
+                                [-o OUTPUT_PATH] [-pp] [-d DEVICE] [-m MODEL] [-dB] [-ncm] [-bd]
 
 options:
   -h, --help                       show this help message and exit
@@ -155,6 +157,7 @@ options:
   -d, --device DEVICE              "cpu", "cuda", or "mps" (default: "cpu")
   -m, --model MODEL                model file name, e.g. "UNet-S1.pt" or "Otsu_Threshold"
   -dB                               set if the Sentinel-1 input is already in decibels
+  -ncm, --no-cloud-mask            Sentinel-2/PlanetScope: don't mask clouds (see 3.3, 3.4)
   -bd, --bayesian-dropout          estimate per-pixel uncertainty (see 3.1); ~25x slower
 ```
 

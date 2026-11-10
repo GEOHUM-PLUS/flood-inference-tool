@@ -27,6 +27,9 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
             "sentinel-1", "sentinel-2", or "planetscope"
         sar_is_dB:bool
             wheter or not SAR data is in decibels
+        mask_clouds:bool (optional, default True)
+            sentinel-2 and planetscope: whether pixels flagged by the input's cloud mask
+            (SCL band / auxiliary file) are excluded and set to no data in the result
     '''
     time_start = time.time()
     # check if it's running the ui or terminal version
@@ -36,9 +39,7 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
     # if it is a model that rely on neural networks...
     if not model_path in ('models/Otsu_Threshold', 'models/WF2_unetv2_bgriswirs'):
         # innitially load the model weights (downloaded on first use)
-        if not ui is None:
-            ui['button_run']["text"] = "Downloading model weights..."
-        model_data = load_model_file(os.path.basename(model_path))
+        model_data = load_model_file(os.path.basename(model_path), ui=ui)
 
         # load model for inference
         match model_path:
@@ -78,7 +79,8 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
             input_files = input_info['input_files'],
             data_type = input_info['data_type'],
             sar_data_is_in_dB = input_info['sar_is_dB'] if 'sar_is_dB' in input_info.keys() else True,
-            processing_type = model_data['data_preprocessing']
+            processing_type = model_data['data_preprocessing'],
+            mask_clouds = input_info.get('mask_clouds', True)
         )
         if model_data['data_preprocessing']=='dofa':
             dataset = normalize_for_dofa(dataset, nodata_mask, input_info['data_type'])
@@ -202,7 +204,7 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
 
             bayesian_dropout = False
 
-            inference, nodata_mask = run_wf2_inference(input_info['input_files'][0], device, ui=ui)
+            inference, nodata_mask = run_wf2_inference(input_info['input_files'][0], device, ui=ui, mask_clouds=input_info.get('mask_clouds', True))
 
     # clean small areas if necessary
     if clean_result:
@@ -240,19 +242,30 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
     if not ui is None:
         alert_finished(result_path, time_elapsed/60)
         if show_plot:
-            # plotting must happen on the tkinter (main) thread, not this worker thread
-            ui['window'].after(0, lambda: show_results_plot(ui['window'], input_info, result_path))
-        ui['button_run']['state'] = 'normal'
-        ui['button_run']["text"] = "Start Processing"
+            # plotting must happen on the tkinter (main) thread, not this worker thread;
+            # the button stays disabled until the plot is up
+            ui['button_run']["text"] = "Preparing plot..."
+            ui['window'].after(0, lambda: show_results_plot(ui['window'], input_info, result_path, ui['button_run']))
+        else:
+            reset_run_button(ui['button_run'])
+
+def reset_run_button(button_run):
+    button_run['state'] = 'normal'
+    button_run["text"] = "Start Processing"
 
 # TODO: Check if inputs are valid
 # TODO: Disable everything in the UI
-def show_results_plot(window, input_info, result_path):
+def show_results_plot(window, input_info, result_path, button_run=None):
     try:
+        # plotting blocks the tkinter loop, so draw the "Preparing plot..." text first
+        window.update_idletasks()
         from src.plotter import plot_results
         plot_results(input_info['input_files'][0], result_path, input_info['data_type'], parent=window, sar_is_dB=input_info.get('sar_is_dB', True))
     except Exception as exc:
         show_error(f'Could not plot the results: {exc}')
+    finally:
+        if not button_run is None:
+            reset_run_button(button_run)
 
 def start_processing(model_name, input_info, output_path, post_processing=False, window=None, pb=None, 
     device=None, bt_run=None, bayesian_dropout:bool=False, show_plot:bool=False):
@@ -279,16 +292,33 @@ def start_processing(model_name, input_info, output_path, post_processing=False,
         )
     ).start()
 
-# This tool's model weights are hosted on Hugging Face, and downloaded into the
-# local Hugging Face cache the first time each model is used. Pinned to a
-# commit, so a later change to the hosted files can't silently change results.
+# This tool's model weights are hosted on Hugging Face. Each one is downloaded
+# into the repository's models/ folder the first time it is used; after that it
+# is loaded straight from there, without contacting Hugging Face (delete a file
+# to download it again). Downloads are pinned to a commit, so a later change to
+# the hosted files can't silently change results.
 MODELS_REPO_ID = 'matosak/flood-inference-tool'
 MODELS_REVISION = '02e6720f5c2e07220371fd0871528abc16f77cc8'
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
 
-def load_model_file(filename):
+def get_weights_path(repo_id, filename, local_dir, revision=None, ui=None):
+    '''Path of a model file inside local_dir, downloading it from Hugging Face only if it isn't there yet.'''
+    weights_path = os.path.join(local_dir, *filename.split('/'))
+    if os.path.isfile(weights_path):
+        if not ui is None:
+            ui['button_run']["text"] = "Loading model..."
+        return weights_path
+
     from huggingface_hub import hf_hub_download
+    if not ui is None:
+        ui['button_run']["text"] = "Downloading model weights..."
+    print(f'Downloading {filename} into {local_dir}...')
+    # downloads to a temporary file first, so an interrupted download never
+    # leaves a partial file behind at weights_path
+    return hf_hub_download(repo_id=repo_id, filename=filename, revision=revision, local_dir=local_dir)
 
-    weights_path = hf_hub_download(repo_id=MODELS_REPO_ID, filename=filename, revision=MODELS_REVISION)
+def load_model_file(filename, ui=None):
+    weights_path = get_weights_path(MODELS_REPO_ID, filename, MODELS_DIR, revision=MODELS_REVISION, ui=ui)
     # UNet-S2.pt also stores its training loss curves as numpy scalars, which
     # the safe unpickler only accepts once allowlisted.
     numpy_core = getattr(np, '_core', None) or np.core
@@ -323,18 +353,18 @@ def build_tile_batches(height, width, chip_size, chip_border, nodata_mask, batch
 
     return starting_coordinates_batches
 
-def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=False, processing_type:str='normalize', path_input_image_aux:str=None):
+def load_input_data(input_files:list, data_type:str, sar_data_is_in_dB:bool=False, processing_type:str='normalize', mask_clouds:bool=True):
     if data_type == 'sentinel-1':
         data, nodata_mask = load_and_normalize_sentinel_1_data(input_files[0], sar_data_is_in_dB, processing_type)
         
     if data_type == 'sentinel-2':
-        data, nodata_mask = load_and_normalize_sentinel_2_data(input_files[0])
+        data, nodata_mask = load_and_normalize_sentinel_2_data(input_files[0], mask_clouds)
 
     if data_type == 'planetscope':
         if processing_type == 'dofa':
-            data, nodata_mask = load_planetscope_data(input_files[0], input_files[1])
+            data, nodata_mask = load_planetscope_data(input_files[0], input_files[1], mask_clouds)
         else:
-            data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1])
+            data, nodata_mask = load_and_normalize_planetscope_data(input_files[0], input_files[1], mask_clouds)
 
     return data, nodata_mask
 
@@ -351,9 +381,9 @@ SENTINEL_2_BAND_IDS = {
 # shadows (3), cloud medium probability (8), cloud high probability (9).
 SENTINEL_2_CLOUD_SCL_CLASSES = (3, 8, 9)
 
-def load_and_normalize_sentinel_2_data(input_path):
+def load_and_normalize_sentinel_2_data(input_path, mask_clouds:bool=True):
     if os.path.isdir(input_path):
-        return load_and_normalize_sentinel_2_safe_folder(input_path)
+        return load_and_normalize_sentinel_2_safe_folder(input_path, mask_clouds)
 
     dataset_s2 = r.open(input_path)
     blue = dataset_s2.read(1)
@@ -367,7 +397,7 @@ def load_and_normalize_sentinel_2_data(input_path):
 
     # an optional 7th band (SCL) enables cloud/cloud-shadow masking; older
     # 6-band files (or manually prepared ones) simply won't have it
-    if dataset_s2.count >= 7:
+    if mask_clouds and dataset_s2.count >= 7:
         scl = dataset_s2.read(7)
         nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
 
@@ -412,7 +442,7 @@ def get_sentinel_2_safe_folder_boa_offset(safe_folder):
         return int(elem.text)
     return 0
 
-def load_and_normalize_sentinel_2_safe_folder(safe_folder):
+def load_and_normalize_sentinel_2_safe_folder(safe_folder, mask_clouds:bool=True):
     band_order = ['blue', 'green', 'red', 'nir', 'swir16', 'swir22']
     band_paths = [find_sentinel_2_band_path(safe_folder, SENTINEL_2_BAND_IDS[name]) for name in band_order]
 
@@ -433,16 +463,21 @@ def load_and_normalize_sentinel_2_safe_folder(safe_folder):
     if boa_offset:
         data[:, ~nodata_mask] = np.clip(data[:, ~nodata_mask] + boa_offset, a_min=0, a_max=None)
 
-    # SCL is categorical, so it must be resampled with nearest neighbor, not bilinear
-    scl_path = find_sentinel_2_band_path(safe_folder, 'SCL')
-    with r.open(scl_path) as dataset:
-        scl = dataset.read(1, out_shape=ref_shape, resampling=Resampling.nearest)
-    nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
+    if mask_clouds:
+        # SCL is categorical, so it must be resampled with nearest neighbor, not bilinear
+        scl_path = find_sentinel_2_band_path(safe_folder, 'SCL')
+        with r.open(scl_path) as dataset:
+            scl = dataset.read(1, out_shape=ref_shape, resampling=Resampling.nearest)
+        nodata_mask = nodata_mask | np.isin(scl, SENTINEL_2_CLOUD_SCL_CLASSES)
 
     return data, nodata_mask
 
-def load_planetscope_data(input_path, input_path_aux):
-    '''Reads the blue/green/red/nir bands (found by band name) as-is, and the nodata/cloud mask (0 in the auxiliary file).'''
+def load_planetscope_data(input_path, input_path_aux, mask_clouds:bool=True):
+    '''
+    Reads the blue/green/red/nir bands (found by band name) as-is. Nodata is where
+    all four bands are 0, plus, if mask_clouds, where the auxiliary file's first
+    band is 0 (e.g. Planet's udm2 "clear" band: cloud, shadow, haze, snow).
+    '''
     input_dataset = r.open(input_path)
     data = np.stack([
         input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='blue')+1)),
@@ -451,12 +486,14 @@ def load_planetscope_data(input_path, input_path_aux):
         input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='nir')+1))
     ], axis=0).astype(np.float32)
 
-    nodata_mask = r.open(input_path_aux).read(1)==0
+    nodata_mask = (data==0).all(axis=0)
+    if mask_clouds:
+        nodata_mask = nodata_mask | (r.open(input_path_aux).read(1)==0)
 
     return data, nodata_mask
 
-def load_and_normalize_planetscope_data(input_path, input_path_aux):
-    data, nodata_mask = load_planetscope_data(input_path, input_path_aux)
+def load_and_normalize_planetscope_data(input_path, input_path_aux, mask_clouds:bool=True):
+    data, nodata_mask = load_planetscope_data(input_path, input_path_aux, mask_clouds)
 
     for i in range(4):
         data[i] = (data[i]-np.mean(data[i, ~nodata_mask]))/np.std(data[i, ~nodata_mask])
@@ -558,11 +595,10 @@ WF2_TH_WATER = 0.5
 WF2_TH_CLOUD = 0.5
 WF2_TH_BRIGHTNESS = 3500
 
-def load_wf2_model(device):
-    from huggingface_hub import hf_hub_download
+def load_wf2_model(device, ui=None):
     from src.models import UNetML4FloodsWF2
 
-    weights_path = hf_hub_download(repo_id=WF2_REPO_ID, filename=WF2_FILENAME)
+    weights_path = get_weights_path(WF2_REPO_ID, WF2_FILENAME, os.path.join(MODELS_DIR, 'ml4floods'), ui=ui)
     state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
     state_dict = {k.removeprefix('network.'): v for k, v in state_dict.items()}
 
@@ -592,18 +628,16 @@ def predict_wf2_chips(model, batch_chips, device):
     mask[(x==0).all(dim=1)] = 0
     return mask.cpu().numpy()
 
-def run_wf2_inference(input_path, device, ui=None):
+def run_wf2_inference(input_path, device, ui=None, mask_clouds:bool=True):
     '''
     Runs ml4floods' WF2_unetv2_bgriswirs model on a Sentinel-2 input (single 6+
     band file or a .SAFE folder), tiling the same way as this tool's other
     neural-net models. Returns (inference, nodata_mask) with inference labels
     {0: nodata, 1: land, 2: water, 3: cloud}.
     '''
-    if not ui is None:
-        ui['button_run']["text"] = "Downloading model weights..."
-    model = load_wf2_model(device)
+    model = load_wf2_model(device, ui=ui)
 
-    dataset, nodata_mask = load_and_normalize_sentinel_2_data(input_path)
+    dataset, nodata_mask = load_and_normalize_sentinel_2_data(input_path, mask_clouds)
     dataset = np.stack([np.pad(dataset[i], pad_width=WF2_CHIP_BORDER, mode='reflect') for i in range(len(dataset))])
 
     if not ui is None:

@@ -20,6 +20,7 @@ if __name__=='__main__':
     parser.add_argument('-d', '--device', default='cpu', type=str, help='The device used to run the inference. Example values are "cpu", "cuda", and "mps".')
     parser.add_argument('-m', '--model', type=str, help='Model to use for the prediction.')
     parser.add_argument('-dB', action='store_true', help='Wether the SAR data is in dB.')
+    parser.add_argument('-ncm', '--no-cloud-mask', action='store_true', help='Sentinel-2 and PlanetScope: do not mask clouds using the cloud mask of the input (SCL band / auxiliary file); only no-data pixels are masked.')
     parser.add_argument('-bd', '--bayesian-dropout', action='store_true', help='Wether to use Bayesian Dropout to estimate uncertainty.')
 
     args = parser.parse_args()
@@ -49,7 +50,8 @@ if __name__=='__main__':
             input_info={
                 'input_files': args.input_file_sentinel_1 if not args.input_file_sentinel_1 is None else args.input_file_sentinel_2 if not args.input_file_sentinel_2 is None else args.input_files_planetscope if not args.input_files_planetscope is None else '',
                 'data_type': 'sentinel-1' if not args.input_file_sentinel_1 is None else 'sentinel-2' if not args.input_file_sentinel_2 is None else 'planetscope' if not args.input_files_planetscope is None else '',
-                'sar_is_dB': args.dB
+                'sar_is_dB': args.dB,
+                'mask_clouds': not args.no_cloud_mask
             },
             output_path=args.output_path,
             post_processing=args.post_processing, 

@@ -49,7 +49,8 @@ def build_ui():
         models=MODEL_OPTIONS['sentinel-2'],
         show_dB_checkbox=False,
         input_is_folder=True,
-        stac_search=True
+        stac_search=True,
+        cloud_mask_text='Mask clouds (using the SCL band, when present)'
     )
 
     frame = ttk.Frame(notebook)
@@ -59,7 +60,8 @@ def build_ui():
         data_type='planetscope',
         input_labels=['Input file:', 'Input auxiliary file:'],
         models=MODEL_OPTIONS['planetscope'],
-        show_dB_checkbox=False
+        show_dB_checkbox=False,
+        cloud_mask_text='Mask clouds (using the auxiliary file)'
     )
 
     notebook.pack(pady=(10, 0))
@@ -68,7 +70,7 @@ def build_ui():
 
     window.mainloop()
 
-def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, input_is_folder=False, stac_search=False):
+def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, input_is_folder=False, stac_search=False, cloud_mask_text=None):
     input_vars = [add_file_row(window, label, folder=input_is_folder) for label in input_labels]
 
     sar_is_dB = add_checkbox_row(window, 'SAR data is in dB') if show_dB_checkbox else None
@@ -81,6 +83,7 @@ def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, in
     var_model = add_dropdown_row(window, 'Model: ', models, '---')
     var_device = add_dropdown_row(window, 'Device: ', get_available_devices(), 'cpu')
 
+    mask_clouds = add_checkbox_row(window, cloud_mask_text, default=True) if cloud_mask_text else None
     use_bayesian_dropout = add_checkbox_row(window, '(EXPERIMENTAL) Use Bayesian Dropout to estimate uncertainty')
     use_postprocess = add_checkbox_row(window, 'Remove noise from flood map')
     show_plot = add_checkbox_row(window, 'Show plot of the results when finished')
@@ -96,6 +99,8 @@ def build_data_tab(window, data_type, input_labels, models, show_dB_checkbox, in
         }
         if sar_is_dB is not None:
             input_info['sar_is_dB'] = sar_is_dB.get()
+        if mask_clouds is not None:
+            input_info['mask_clouds'] = mask_clouds.get()
 
         start_processing(
             model_name=var_model.get(),
