@@ -41,6 +41,10 @@ STAC_DATA_TYPES = {
     'sentinel-1': {
         'title': 'Sentinel-1',
         'show_cloud_cover': False,
+        # ascending/descending passes view the ground from different geometries
+        # (look direction, incidence angle), so a date with both shouldn't be
+        # mosaicked into a single scene -- list them as separate rows instead.
+        'split_by_orbit': True,
         # GRD here is calibrated by this tool but not terrain-corrected, unlike
         # RTC -- see MANUAL.md. Still the default: some users get better results
         # from it than from RTC despite that, depending on the scene.
@@ -322,7 +326,7 @@ class StacSearchWindow:
     def search_done(self, items):
         if not self.window.winfo_exists():
             return
-        self.groups = group_items_by_date(items)
+        self.groups = group_items_by_date(items, split_by_orbit=self.type_config.get('split_by_orbit', False))
         self.search_button.config(state='normal', text='Search')
         for date, group_items in self.groups:
             self.results_listbox.insert(tk.END, self.format_group_line(date, group_items))

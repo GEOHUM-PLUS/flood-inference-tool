@@ -40,17 +40,31 @@ SENTINEL_1_BAND_ORDER = ['vh', 'vv']
 MOSAIC_CRS = 'EPSG:3857'
 MOSAIC_RESOLUTION = 10  # meters
 
-def group_items_by_date(items):
+def group_items_by_date(items, split_by_orbit=False):
     '''
     Groups STAC items by acquisition date (UTC), so that several scenes covering
     the same AOI on the same date (e.g. adjacent tiles/orbits) can be downloaded
     and mosaicked together as one. Returns a list of (date, items) tuples, most
     recent date first; each group's items keep their original relative order.
+
+    If split_by_orbit, items are also split by ascending/descending overpass
+    direction (sat:orbit_state) before grouping -- relevant for Sentinel-1, where
+    ascending and descending scenes view the ground from different geometries and
+    shouldn't be mosaicked together. A date with both then becomes two separate
+    (date, items) entries, each with only one orbit direction's items.
     '''
+    def group_key(item):
+        date = item.datetime.date()
+        return (date, item.properties.get('sat:orbit_state', 'unknown')) if split_by_orbit else date
+
     groups = {}
     for item in items:
-        groups.setdefault(item.datetime.date(), []).append(item)
-    return [(date, groups[date]) for date in sorted(groups, reverse=True)]
+        groups.setdefault(group_key(item), []).append(item)
+
+    sorted_keys = sorted(groups, reverse=True)
+    if split_by_orbit:
+        return [(key[0], groups[key]) for key in sorted_keys]
+    return [(key, groups[key]) for key in sorted_keys]
 
 def search_sentinel_2(bbox, date_start, date_end, max_cloud_cover=90, limit=50):
     '''
