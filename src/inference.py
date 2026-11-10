@@ -277,7 +277,26 @@ def show_results_plot(window, input_info, result_path, button_run=None):
         if not button_run is None:
             reset_run_button(button_run)
 
-def start_processing(model_name, input_info, output_path, post_processing=False, window=None, pb=None, 
+def run_inference_safely(*args, window=None, bt_run=None, **kwargs):
+    '''
+    inference() runs in a background thread (see start_processing): an uncaught
+    exception there doesn't reach tkinter's main loop, so it would otherwise just
+    print a traceback to the console, with no message shown to the user and the
+    "Start Processing" button stuck disabled forever. This wraps it so any failure
+    (e.g. an input file with an unexpected number of bands) is surfaced and the
+    button is restored.
+    '''
+    try:
+        inference(*args, **kwargs)
+    except Exception as exc:
+        if not window is None:
+            # except...as exc unbinds exc once this block ends, so it must be
+            # captured by value (default arg), not by reference, for these
+            # deferred callbacks to still see it once tkinter runs them
+            window.after(0, lambda exc=exc: show_error(f'Processing failed: {exc}'))
+            window.after(0, lambda: reset_run_button(bt_run))
+
+def start_processing(model_name, input_info, output_path, post_processing=False, window=None, pb=None,
     device=None, bt_run=None, bayesian_dropout:bool=False, show_plot:bool=False):
 
     # if input_image_path and output_path:
@@ -289,17 +308,18 @@ def start_processing(model_name, input_info, output_path, post_processing=False,
     print('Device:', device)
 
     Thread(
-        target=inference,
+        target=run_inference_safely,
         args=(
             f'models/{model_name}',
-            input_info, 
-            output_path, 
-            post_processing, 
+            input_info,
+            output_path,
+            post_processing,
             None if window is None else {'window': window, 'progress_bar': pb, 'button_run': bt_run},
             device,
             bayesian_dropout,
             show_plot
-        )
+        ),
+        kwargs={'window': window, 'bt_run': bt_run},
     ).start()
 
 # This tool's model weights are hosted on Hugging Face. Each one is downloaded
@@ -396,6 +416,8 @@ def load_and_normalize_sentinel_2_data(input_path, mask_clouds:bool=True):
         return load_and_normalize_sentinel_2_safe_folder(input_path, mask_clouds)
 
     dataset_s2 = r.open(input_path)
+    if dataset_s2.count < 6:
+        raise IOError(f'Expected a Sentinel-2 file with at least 6 bands (blue, green, red, nir, swir16, swir22), but "{input_path}" has only {dataset_s2.count}.')
     blue = dataset_s2.read(1)
     green = dataset_s2.read(2)
     red = dataset_s2.read(3)
@@ -489,11 +511,15 @@ def load_planetscope_data(input_path, input_path_aux, mask_clouds:bool=True):
     band is 0 (e.g. Planet's udm2 "clear" band: cloud, shadow, haze, snow).
     '''
     input_dataset = r.open(input_path)
+    descriptions = np.asarray(input_dataset.descriptions)
+    missing_bands = [name for name in ('blue', 'green', 'red', 'nir') if name not in descriptions]
+    if missing_bands:
+        raise IOError(f'Expected a PlanetScope file with bands named {missing_bands}, but "{input_path}" has none named that (its band descriptions are {list(input_dataset.descriptions)}).')
     data = np.stack([
-        input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='blue')+1)),
-        input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='green')+1)),
-        input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='red')+1)),
-        input_dataset.read(int(np.argmax(np.asarray(input_dataset.descriptions)=='nir')+1))
+        input_dataset.read(int(np.argmax(descriptions=='blue')+1)),
+        input_dataset.read(int(np.argmax(descriptions=='green')+1)),
+        input_dataset.read(int(np.argmax(descriptions=='red')+1)),
+        input_dataset.read(int(np.argmax(descriptions=='nir')+1))
     ], axis=0).astype(np.float32)
 
     nodata_mask = (data==0).all(axis=0)
@@ -559,6 +585,8 @@ def normalize_for_dofa(dataset, nodata_mask, data_type):
 
 def load_and_normalize_sentinel_1_data(path_input_image, data_is_in_dB:bool=False, processing_type:str='normalize'):
     dataset_sar = r.open(path_input_image)
+    if dataset_sar.count < 2:
+        raise IOError(f'Expected a Sentinel-1 file with at least 2 bands (VH, VV), but "{path_input_image}" has only {dataset_sar.count}.')
     vv = dataset_sar.read(2)
     vh = dataset_sar.read(1)
 
