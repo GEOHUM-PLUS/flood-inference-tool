@@ -6,8 +6,8 @@ import torch
 from src.inference import start_processing
 
 MODEL_OPTIONS = {
-    'sentinel-1': ['UNet-S1.pt', 'DistanceMap.pt', 'Otsu_Threshold'],
-    'sentinel-2': ['UNet-S2.pt', 'WF2_unetv2_bgriswirs', 'dofa_v2_base_seg_upernet_s2.pt'],
+    'sentinel-1': ['UNet-S1.pt', 'DistanceMap.pt', 'Otsu_Threshold', 'mm_unet_s1s2.pt'],
+    'sentinel-2': ['UNet-S2.pt', 'WF2_unetv2_bgriswirs', 'dofa_v2_base_seg_upernet_s2.pt', 'mm_unet_s1s2.pt'],
     'planetscope': ['UNet-PlanetScope.pt', 'dofa_v2_base_seg_upernet_PS.pt'],
 }
 

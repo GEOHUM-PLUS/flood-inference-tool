@@ -82,11 +82,12 @@ The window has three tabs — **Sentinel-1**, **Sentinel-2** and **PlanetScope**
 ### 3.2 Sentinel-1 tab
 
 - **Input file**: a GeoTIFF with two bands, **VH then VV**, in that order (not reversible). If you prepared the image yourself from the raw `.zip` product, see the pre-processing steps required in SNAP (`S-1 Thermal Noise Removal`, `Calibrate`, `Range-Doppler Terrain Correction`) described in `README.md`; images from Google Earth Engine, or downloaded through this tool's own STAC search (see [section 4](#4-searching-and-downloading-imagery-online)), need no such pre-processing.
-- **SAR data is in dB**: leave this **unchecked** if the file's VH/VV values are linear-scale backscatter (the usual case, including files downloaded via this tool's STAC search). Check it only if the values are already in decibels.
+- **SAR data is in dB**: leave this **unchecked** if the file's VH/VV values are linear-scale backscatter. Check it only if the values are already in decibels — this is done for you automatically for files downloaded via this tool's STAC search (both GRD and RTC), which are always saved already in dB.
 - **Model**:
-  - `UNet-S1.pt` — the tool's main Sentinel-1 flood-mapping model.
+  - `UNet-S1.pt` — the tool's main Sentinel-1 flood-mapping model. Trained on RTC-like (terrain-corrected) data — see the GRD/RTC note in [section 4](#4-searching-and-downloading-imagery-online) if your input is GRD, this tool's default STAC processing level.
   - `DistanceMap.pt` — a variant that also incorporates terrain slope and an internal distance-to-water estimate. It automatically downloads a Copernicus 30m DEM covering the scene the first time it runs for a given input, so it needs an internet connection and is noticeably slower ("Downloading DEM..." is shown while this happens).
   - `Otsu_Threshold` — a simple, non-machine-learning method that automatically picks a brightness threshold on the VH band to separate water from land. Fast, but generally less accurate than the neural-network models, and most useful as a quick sanity check or fallback.
+  - `mm_unet_s1s2.pt` — a dual-stream model from the [udl4fl](https://huggingface.co/isp-uv-es/udl4fl_models) project (CC BY-NC 4.0 licensed: non-commercial use only), trained to use Sentinel-1 and/or Sentinel-2 together or individually. Here it only runs its Sentinel-1 branch (VV, VH); the same checkpoint is also offered on the Sentinel-2 tab, running its Sentinel-2 branch instead — this tool always uses one modality at a time, never both together. It was trained on Sentinel-1 GRD data, which matches this tool's default STAC processing level (unlike UNet-S1.pt, above) but not RTC.
 
 ### 3.3 Sentinel-2 tab
 
@@ -99,6 +100,7 @@ The window has three tabs — **Sentinel-1**, **Sentinel-2** and **PlanetScope**
   - `UNet-S2.pt` — this project's own Sentinel-2 flood-mapping model.
   - `WF2_unetv2_bgriswirs` — a model from the [ml4floods](https://huggingface.co/isp-uv-es/ml4floods) project. Unlike the other models, it produces four classes rather than three, since it detects clouds itself (see [section 5](#5-understanding-the-output-file)). Like the other models, its weights are downloaded automatically the first time it is selected.
   - `dofa_v2_base_seg_upernet_s2.pt` — a DOFA v2 foundation-model encoder with a UPerNet decoder, trained with the DOFA-transferability project on Sen1Floods11 (weak labels, then hand labels). It uses only the blue, green, red and NIR bands (B2, B3, B4, B8). It reached a water IoU of 82.7 on the Sen1Floods11 test set, and 39–52 on the FloodPlanet evaluation, where it was precise (94–99%) but missed part of the water. It is a large model, so it runs much faster on a GPU (`cuda`) than on the CPU.
+  - `mm_unet_s1s2.pt` — the Sentinel-2 branch (blue, green, red, nir, swir16, swir22) of the same [udl4fl](https://huggingface.co/isp-uv-es/udl4fl_models) model described for the Sentinel-1 tab in [3.2](#32-sentinel-1-tab) (CC BY-NC 4.0 licensed: non-commercial use only). It was trained on Sentinel-2 L1C data, while this tool's own pipeline provides L2A data, so results may differ somewhat from the authors' own reported accuracy.
 - **Mask clouds (using the SCL band, when present)**: checked by default. Pixels the SCL band flags as cloud shadow, medium-probability cloud or high-probability cloud are excluded from processing and set to no data (`0`) in the result. Uncheck it to classify those pixels too, e.g. when the SCL flags water or bright areas as cloud by mistake. Without an SCL band (a 6-band file), there is nothing to mask either way. `WF2_unetv2_bgriswirs` still predicts its own cloud class with this unchecked.
 - There is no dB option on this tab (it does not apply to optical imagery).
 
@@ -114,16 +116,24 @@ The window has three tabs — **Sentinel-1**, **Sentinel-2** and **PlanetScope**
 
 ## 4. Searching and downloading imagery online
 
-The Sentinel-1 and Sentinel-2 tabs each have a **"Search Sentinel-1/2 via STAC..."** button above the input field. This opens a separate window to find and download imagery directly from Microsoft's Planetary Computer catalog, without needing to source it elsewhere first.
+The Sentinel-1 and Sentinel-2 tabs each have a **"Search Sentinel-1/2 via STAC..."** button above the input field. This opens a separate window to find and download imagery directly from Microsoft's Planetary Computer catalog (or, for Sentinel-2 L1C, from earth-search), without needing to source it elsewhere first.
 
 1. **Draw a bounding box**: click "Draw bounding box", then click and drag on the map to mark your area of interest. The map can be panned and zoomed as usual beforehand to find the right place.
-2. **Set a date range**: the "From"/"To" fields default to the last 30 days; edit them (as `YYYY-MM-DD`) to widen or narrow the search. For Sentinel-2, a maximum cloud cover percentage can also be set.
-3. **Click Search**. Results are grouped by acquisition date: if several scenes from adjacent tiles or orbits cover your area on the same date, they appear as a single row (e.g. `2024-02-29 | 2 scenes | mean cloud cover: 47.8%`), and will be downloaded and merged together automatically. Selecting a row shows that date's scene(s) outlined on the map as a preview.
-4. **Click "Download Selected"** and choose where to save the file. Only the pixels inside your drawn bounding box are downloaded (not the full scene(s)), windowed directly from the cloud-hosted imagery, so this is usually fast even for a large original scene. Once finished, the file path is filled in automatically in the corresponding tab's input field, ready to process.
+2. **Choose a processing level** (top right): for Sentinel-1, **GRD** (the default) or **RTC**; for Sentinel-2, **L2A** (the default) or **L1C**. See the table below — changing this clears any current results, since it searches a different catalog.
+3. **Set a date range**: the "From"/"To" fields default to the last 30 days; edit them (as `YYYY-MM-DD`) to widen or narrow the search. For Sentinel-2, a maximum cloud cover percentage can also be set.
+4. **Click Search**. Results are grouped by acquisition date: if several scenes from adjacent tiles or orbits cover your area on the same date, they appear as a single row (e.g. `2024-02-29 | 2 scenes | mean cloud cover: 47.8%`), and will be downloaded and merged together automatically. Selecting a row shows that date's scene(s) outlined on the map as a preview.
+5. **Click "Download Selected"** and choose where to save the file. Only the pixels inside your drawn bounding box are downloaded (not the full scene(s)), windowed directly from the cloud-hosted imagery, so this is usually fast even for a large original scene. Once finished, the file path is filled in automatically in the corresponding tab's input field, ready to process.
+
+| Level | Sensor | What it is | Notes |
+|---|---|---|---|
+| **GRD** (default) | Sentinel-1 | Calibrated by this tool from the raw digital numbers (thermal noise removed), but **not terrain-corrected**. | Faster, and some scenes look better than RTC, but it isn't geometrically corrected for terrain (layover/foreshortening), which can look like water where there isn't any. See [section 7](#7-troubleshooting) if results look off. |
+| RTC | Sentinel-1 | Radiometrically Terrain Corrected: analysis-ready, orthorectified backscatter. | This tool's previous default; the geometrically "correct" option, but conservative in some scenes. |
+| **L2A** (default) | Sentinel-2 | Atmospherically corrected surface reflectance. | Has a Scene Classification Layer, so cloud masking works ([3.3](#33-sentinel-2-tab)). |
+| L1C | Sentinel-2 | Top-of-atmosphere reflectance, uncorrected. | No Scene Classification Layer, so results are never cloud-masked, regardless of the **Mask clouds** setting. |
 
 ![The Sentinel-1 STAC search window, with a bounding box drawn and search results grouped by date](figures/ui_STAC_search.png)
 
-*Figure 3 — the Sentinel-1 STAC search window: a bounding box drawn on the map, the "From"/"To" date range above the results list, and the results themselves grouped by acquisition date, with the number of scenes found and the orbit direction for each date (cloud cover is shown instead for Sentinel-2 searches, as described above). The highlighted row is the one currently selected, ready for "Download Selected".*
+*Figure 3 — the Sentinel-1 STAC search window: a bounding box drawn on the map, the "From"/"To" date range above the results list, and the results themselves grouped by acquisition date, with the number of scenes found and the orbit direction for each date (cloud cover is shown instead for Sentinel-2 searches, as described above). The highlighted row is the one currently selected, ready for "Download Selected". This screenshot predates the processing-level dropdown described above, which appears to the right of the bounding-box label in the current version.*
 
 ## 5. Understanding the output file
 
@@ -131,7 +141,7 @@ The output is a GeoTIFF with the same geographic footprint as the input. Its fir
 
 | Model(s)                                   | 0        | 1    | 2     | 3     |
 |---------------------------------------------|----------|------|-------|-------|
-| `UNet-S1.pt`, `UNet-S2.pt`, `DistanceMap.pt`, `UNet-PlanetScope.pt`, `dofa_v2_base_seg_upernet_s2.pt`, `dofa_v2_base_seg_upernet_PS.pt`, `Otsu_Threshold` | no data | dry  | flood/water | — |
+| `UNet-S1.pt`, `UNet-S2.pt`, `DistanceMap.pt`, `UNet-PlanetScope.pt`, `dofa_v2_base_seg_upernet_s2.pt`, `dofa_v2_base_seg_upernet_PS.pt`, `mm_unet_s1s2.pt`, `Otsu_Threshold` | no data | dry  | flood/water | — |
 | `WF2_unetv2_bgriswirs`                      | no data | land | water | cloud |
 
 If **Bayesian Dropout** was enabled, the file instead has two floating-point bands: the first is the model's prediction (same meaning as above) and the second is a per-pixel uncertainty estimate (higher values mean the model was less confident at that pixel).
@@ -182,3 +192,4 @@ The command-line interface does not include the STAC search window or the "show 
 - **Processing on `cuda`/`mps` isn't offered** — no compatible GPU was detected on this machine; `cpu` will always work, just more slowly.
 - **A Sentinel-1 result looks unexpectedly inverted or much noisier than usual** — double-check the "SAR data is in dB" checkbox matches your input file's actual scale (see [3.2](#32-sentinel-1-tab)).
 - **`DistanceMap.pt` is slow the first time** — it downloads a terrain elevation model for the scene's area automatically; this only happens once per input file and requires an internet connection.
+- **A Sentinel-1 result from a STAC-downloaded scene predicts much more (or much less) flooding than expected, especially following street/block-shaped patterns** — try the other processing level ([section 4](#4-searching-and-downloading-imagery-online)). GRD (the default) isn't terrain-corrected, so radar layover/shadow over buildings and steep terrain can look like water; RTC fixes that but is sometimes too conservative. Which one works better depends on the scene.

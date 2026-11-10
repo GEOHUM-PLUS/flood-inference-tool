@@ -37,7 +37,7 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
         ui['progress_bar']['value'] = 0
 
     # if it is a model that rely on neural networks...
-    if not model_path in ('models/Otsu_Threshold', 'models/WF2_unetv2_bgriswirs'):
+    if not model_path in ('models/Otsu_Threshold', 'models/WF2_unetv2_bgriswirs', 'models/mm_unet_s1s2.pt'):
         # innitially load the model weights (downloaded on first use)
         model_data = load_model_file(os.path.basename(model_path), ui=ui)
 
@@ -205,6 +205,16 @@ def inference(model_path:str, input_info:dict, result_path:str, clean_result:boo
             bayesian_dropout = False
 
             inference, nodata_mask = run_wf2_inference(input_info['input_files'][0], device, ui=ui, mask_clouds=input_info.get('mask_clouds', True))
+
+        elif model_path=='models/mm_unet_s1s2.pt':
+            if input_info['data_type'] not in ('sentinel-1', 'sentinel-2'):
+                raise IOError('Unsuitable data type for mm_unet_s1s2.')
+
+            bayesian_dropout = False
+
+            inference, nodata_mask = run_mm_unet_inference(
+                input_info['input_files'][0], input_info['data_type'], device, ui=ui,
+                sar_is_dB=input_info.get('sar_is_dB', True), mask_clouds=input_info.get('mask_clouds', True))
 
     # clean small areas if necessary
     if clean_result:
@@ -662,6 +672,114 @@ def run_wf2_inference(input_path, device, ui=None, mask_clouds:bool=True):
             ui['progress_bar']['value'] = 100*batch_count/len(starting_coordinates_batches)
 
     inference = inference[WF2_CHIP_BORDER:-WF2_CHIP_BORDER, WF2_CHIP_BORDER:-WF2_CHIP_BORDER]
+    return inference, nodata_mask
+
+# mm_unet_s1s2: https://huggingface.co/isp-uv-es/udl4fl_models
+MM_UNET_REPO_ID = 'isp-uv-es/udl4fl_models'
+MM_UNET_FILENAME = 'mm_unet_s1s2.pt'
+MM_UNET_CHIP_SIZE = 512
+MM_UNET_CHIP_BORDER = 94
+MM_UNET_BATCH_SIZE = 8
+
+# normalization statistics (mean, std), from the model's own training config
+# (mm_unet_s1s2.json): S1 is [VV, VH] in dB (matching this tool's own internal
+# band order, see load_and_normalize_sentinel_1_data), S2 is
+# blue/green/red/nir/swir16/swir22 raw digital numbers.
+MM_UNET_NORMALIZATION = {
+    'sentinel-1': {
+        'mean': [-12.672623634338379, -20.651826858520508],
+        'std': [6.107601642608643, 8.471637725830078],
+    },
+    'sentinel-2': {
+        'mean': [1091.6708984375, 999.8798217773438, 968.8703002929688, 2005.2158203125, 1923.3369140625, 1241.5242919921875],
+        'std': [275.3205871582031, 353.46099853515625, 585.6177978515625, 929.5694580078125, 1056.81201171875, 839.3709106445312],
+    },
+}
+
+def load_mm_unet_model(device, ui=None):
+    from src.models import MMUnetS1S2
+
+    weights_path = get_weights_path(MM_UNET_REPO_ID, MM_UNET_FILENAME, os.path.join(MODELS_DIR, 'udl4fl'), ui=ui)
+    state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+    state_dict = {k.removeprefix('network.'): v for k, v in state_dict.items()}
+
+    model = MMUnetS1S2(in_channels_s1=2, in_channels_s2=6, num_classes=2).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
+
+def normalize_for_mm_unet(dataset, nodata_mask, data_type):
+    '''Standardises VV/VH (dB) or blue/green/red/nir/swir16/swir22 bands with mm_unet_s1s2's own training statistics; nodata pixels become 0.'''
+    mean = np.asarray(MM_UNET_NORMALIZATION[data_type]['mean'], dtype=np.float32)[:,None,None]
+    std = np.asarray(MM_UNET_NORMALIZATION[data_type]['std'], dtype=np.float32)[:,None,None]
+    dataset = ((dataset.astype(np.float32)-mean)/std).astype(np.float32)
+    dataset[:, nodata_mask] = 0
+    return dataset
+
+def predict_mm_unet_chips(model, batch_chips, data_type, device):
+    '''
+    batch_chips: (batch, 2 or 6, H, W) normalized VV/VH or blue/green/red/nir/swir16/swir22.
+    Returns a (batch, H, W) uint8 array with labels {0: nodata, 1: dry, 2: flood}.
+    '''
+    x = torch.nan_to_num(batch_chips, nan=0.0).to(device)
+    batch_size = x.shape[0]
+    if data_type=='sentinel-1':
+        batch = {'S1': x, 'input_flag': torch.tensor([[1,0]]*batch_size, device=device)}
+    else:
+        batch = {'S2': x, 'input_flag': torch.tensor([[0,1]]*batch_size, device=device)}
+
+    with torch.no_grad():
+        probs = model(batch)
+    # {0: land, 1: water} -> {1: dry, 2: flood} (0 stays reserved for nodata)
+    mask = (torch.argmax(probs, dim=1)+1).to(torch.uint8)
+    mask[(x==0).all(dim=1)] = 0
+    return mask.cpu().numpy()
+
+def run_mm_unet_inference(input_path, data_type, device, ui=None, sar_is_dB:bool=True, mask_clouds:bool=True):
+    '''
+    Runs isp-uv-es/udl4fl_models' mm_unet_s1s2 on a single Sentinel-1 or
+    Sentinel-2 input, using only that one modality (the checkpoint also
+    supports combining both at once, which this tool doesn't expose yet).
+    Tiles with overlapping context (cropped away before stitching), the same
+    way this tool's other models do -- the reference implementation itself
+    tiles edge-to-edge with no overlap, which works for it because it always
+    runs on whole scenes far larger than one tile, but visibly seams at tile
+    boundaries on a small, STAC-downloaded window where most/all tiles touch
+    the image edge and lose real neighboring context there.
+    Returns (inference, nodata_mask) with inference labels {0: nodata, 1: dry, 2: flood}.
+    '''
+    model = load_mm_unet_model(device, ui=ui)
+
+    if data_type=='sentinel-1':
+        dataset, nodata_mask = load_and_normalize_sentinel_1_data(input_path, sar_is_dB, 'none')
+    else:
+        dataset, nodata_mask = load_and_normalize_sentinel_2_data(input_path, mask_clouds)
+    dataset = normalize_for_mm_unet(dataset, nodata_mask, data_type)
+    dataset = np.stack([np.pad(dataset[i], pad_width=MM_UNET_CHIP_BORDER, mode='reflect') for i in range(len(dataset))])
+
+    if not ui is None:
+        ui['button_run']["text"] = "Getting tiles..."
+    padded_nodata_mask = np.pad(nodata_mask, pad_width=MM_UNET_CHIP_BORDER, mode='reflect')
+    starting_coordinates_batches = build_tile_batches(dataset.shape[1], dataset.shape[2], MM_UNET_CHIP_SIZE, MM_UNET_CHIP_BORDER, padded_nodata_mask, batch_size=MM_UNET_BATCH_SIZE)
+
+    if not ui is None:
+        ui['button_run']["text"] = "Doing the inference..."
+    inference = np.zeros([dataset.shape[1], dataset.shape[2]], dtype=np.uint8)
+
+    batch_count = 0
+    for batch in tqdm(starting_coordinates_batches, desc='Inference:'):
+        batch_chips = np.stack([dataset[:, i:i+MM_UNET_CHIP_SIZE, j:j+MM_UNET_CHIP_SIZE] for i,j in batch])
+        tiles_pred = predict_mm_unet_chips(model, torch.Tensor(batch_chips), data_type, device)
+
+        for index, (i,j) in enumerate(batch):
+            inference[i+MM_UNET_CHIP_BORDER:i+MM_UNET_CHIP_SIZE-MM_UNET_CHIP_BORDER, j+MM_UNET_CHIP_BORDER:j+MM_UNET_CHIP_SIZE-MM_UNET_CHIP_BORDER] = (
+                tiles_pred[index][MM_UNET_CHIP_BORDER:-MM_UNET_CHIP_BORDER, MM_UNET_CHIP_BORDER:-MM_UNET_CHIP_BORDER])
+
+        batch_count += 1
+        if not ui is None:
+            ui['progress_bar']['value'] = 100*batch_count/len(starting_coordinates_batches)
+
+    inference = inference[MM_UNET_CHIP_BORDER:-MM_UNET_CHIP_BORDER, MM_UNET_CHIP_BORDER:-MM_UNET_CHIP_BORDER]
     return inference, nodata_mask
 
 def show_error(message):

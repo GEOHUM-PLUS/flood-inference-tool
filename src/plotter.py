@@ -17,6 +17,10 @@ def prepare_input_data_for_plotting(input_data, data_type, sar_is_dB=False):
     input_data = input_data.astype(np.float32)
 
     if data_type=='sentinel-1':
+        # this tool's own Sentinel-1 files always store nodata as literal 0 (even
+        # when already in dB, where log10 can no longer turn it into -inf for
+        # isfinite() to catch), so it has to be masked out explicitly
+        nodata_mask = input_data[0]==0
         vh, vv = input_data[0], input_data[1]
         if not sar_is_dB:
             with np.errstate(divide='ignore'):
@@ -24,16 +28,20 @@ def prepare_input_data_for_plotting(input_data, data_type, sar_is_dB=False):
         # in dB, a ratio becomes a difference: log(vv/vh) = log(vv) - log(vh)
         input_data = np.stack([vv, vh, vv-vh])
     else:
-        # Sentinel-2 (blue, green, red, ...) and PlanetScope (B, G, R, N): show true color
+        # Sentinel-2 (blue, green, red, ...) and PlanetScope (B, G, R, N): show true
+        # color. nodata is always stored as literal 0 in the blue band (this tool's
+        # own convention, e.g. in load_and_normalize_sentinel_2_data).
+        nodata_mask = input_data[0]==0
         input_data = input_data[[2,1,0]]
 
     for i in range(input_data.shape[0]):
-        finite = np.isfinite(input_data[i])
-        statistics = np.percentile(input_data[i][finite].ravel(), q=[1,99])
+        valid = np.isfinite(input_data[i]) & ~nodata_mask
+        statistics = np.percentile(input_data[i][valid].ravel(), q=[1,99])
         input_data[i] = (input_data[i]-statistics[0])/(statistics[1]-statistics[0])
 
     input_data = np.clip(input_data, 0, 1)
     input_data[~np.isfinite(input_data)] = 0
+    input_data[:, nodata_mask] = 0
     input_data = np.moveaxis(input_data, 0, -1)
 
     return input_data
