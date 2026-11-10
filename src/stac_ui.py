@@ -11,7 +11,13 @@ from PIL import Image, ImageTk
 from tkintermapview import TkinterMapView
 from tkintermapview.utility_functions import decimal_to_osm
 
-from src.stac import search_sentinel_2, download_sentinel_2_window, search_sentinel_1, download_sentinel_1_window, group_items_by_date
+from src.stac import (
+    search_sentinel_2, download_sentinel_2_window,
+    search_sentinel_2_l1c, download_sentinel_2_l1c_window,
+    search_sentinel_1, download_sentinel_1_window,
+    search_sentinel_1_grd, download_sentinel_1_grd_window,
+    group_items_by_date,
+)
 
 DEFAULT_MAP_POSITION = (47.803, 13.035)
 DEFAULT_MAP_ZOOM = 5
@@ -25,24 +31,33 @@ PREVIEW_FETCH_WORKERS = 8
 STAC_DATA_TYPES = {
     'sentinel-2': {
         'title': 'Sentinel-2',
-        'search': search_sentinel_2,
-        'download': download_sentinel_2_window,
         'show_cloud_cover': True,
+        'default_level': 'L2A',
+        'levels': {
+            'L2A': {'search': search_sentinel_2, 'download': download_sentinel_2_window},
+            'L1C': {'search': search_sentinel_2_l1c, 'download': download_sentinel_2_l1c_window},
+        },
     },
     'sentinel-1': {
         'title': 'Sentinel-1',
-        'search': search_sentinel_1,
-        'download': download_sentinel_1_window,
         'show_cloud_cover': False,
+        # GRD here is calibrated by this tool but not terrain-corrected, unlike
+        # RTC -- see MANUAL.md. Still the default: some users get better results
+        # from it than from RTC despite that, depending on the scene.
+        'default_level': 'GRD',
+        'levels': {
+            'GRD': {'search': search_sentinel_1_grd, 'download': download_sentinel_1_grd_window},
+            'RTC': {'search': search_sentinel_1, 'download': download_sentinel_1_window},
+        },
     },
 }
 
 def open_stac_search_window(parent, on_download, data_type='sentinel-2'):
-    '''Opens a window to search Sentinel-1/Sentinel-2 scenes on Planetary Computer's STAC
-    catalog by drawing a bounding box on a map, then download only that bbox's window of the
-    required bands for a chosen date (mosaicking together all scenes found on that date, if
-    more than one covers the area). on_download(output_path) is called once a download
-    finishes.'''
+    '''Opens a window to search Sentinel-1/Sentinel-2 scenes (from Planetary Computer,
+    or earth-search for Sentinel-2 L1C) by drawing a bounding box on a map, then download
+    only that bbox's window of the required bands for a chosen date and processing level
+    (mosaicking together all scenes found on that date, if more than one covers the area).
+    on_download(output_path) is called once a download finishes.'''
     StacSearchWindow(parent, on_download, data_type)
 
 class CanvasImageOverlay:
@@ -157,7 +172,12 @@ class StacSearchWindow:
         self.draw_button.grid(row=0, column=0, padx=(0, 10))
 
         self.bbox_label = tk.Label(controls, text='Bounding box: none selected')
-        self.bbox_label.grid(row=0, column=1, columnspan=5, sticky='w')
+        self.bbox_label.grid(row=0, column=1, columnspan=3, sticky='w')
+
+        tk.Label(controls, text='Level:').grid(row=0, column=4, sticky='e')
+        level_names = list(self.type_config['levels'].keys())
+        self.level_var = tk.StringVar(self.window, value=self.type_config['default_level'])
+        tk.OptionMenu(controls, self.level_var, *level_names, command=lambda _: self.on_level_changed()).grid(row=0, column=5, sticky='w')
 
         tk.Label(controls, text='From:').grid(row=1, column=0, sticky='e')
         date_end = datetime.date.today()
@@ -253,6 +273,13 @@ class StacSearchWindow:
         self.bbox_label.config(text=f'Bounding box: {min_lon:.4f}, {min_lat:.4f}, {max_lon:.4f}, {max_lat:.4f}')
         self.stop_drawing()
 
+    def on_level_changed(self):
+        # a previous search's results are from the level we just switched away
+        # from (a different STAC collection/provider), so they no longer apply
+        self.groups = []
+        self.results_listbox.delete(0, tk.END)
+        self.clear_preview()
+
     def search(self):
         if self.bbox is None:
             messagebox.showerror('Error', 'Please draw a bounding box on the map first.')
@@ -269,7 +296,7 @@ class StacSearchWindow:
         date_start = self.date_start_var.get()
         date_end = self.date_end_var.get()
         bbox = self.bbox
-        search_fn = self.type_config['search']
+        search_fn = self.type_config['levels'][self.level_var.get()]['search']
 
         self.search_button.config(state='disabled', text='Searching...')
         self.results_listbox.delete(0, tk.END)
@@ -339,6 +366,11 @@ class StacSearchWindow:
         preview_href = next((item.assets[key].href for key in PREVIEW_ASSET_KEYS if key in item.assets), None)
         if preview_href is None:
             return None
+        # earth-search (used for Sentinel-2 L1C) gives s3:// asset hrefs, which
+        # urlopen can't fetch directly; roda.sentinel-hub.com is a public https
+        # mirror of the same Sinergise buckets, keyed the same way.
+        if preview_href.startswith('s3://'):
+            preview_href = 'https://roda.sentinel-hub.com/' + preview_href[len('s3://'):]
         try:
             with urllib.request.urlopen(preview_href) as response:
                 image_bytes = response.read()
@@ -370,7 +402,7 @@ class StacSearchWindow:
             return
 
         bbox = self.bbox
-        download_fn = self.type_config['download']
+        download_fn = self.type_config['levels'][self.level_var.get()]['download']
         self.download_button.config(state='disabled', text='Downloading...')
         self.download_progressbar['value'] = 0
 

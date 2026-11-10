@@ -412,6 +412,179 @@ class DOFAv2UPerNet(nn.Module):
         x = nn.functional.interpolate(x, size=output_shape, mode='bilinear')
         return torch.softmax(x, dim=1)
 
+# --- mm_unet_s1s2 (udl4fl) ----------------------------------------------------
+# Standalone port of isp-uv-es/udl4fl_models' mm_unet_s1s2 (S1S2DualEncoder_MD):
+# two independent MobileNetV2 encoders (one per modality) feeding a shared
+# UNet++ decoder, so it runs without segmentation_models_pytorch or torchvision.
+# Module/parameter names mirror the originals (after stripping the checkpoint's
+# "network." prefix) so the training checkpoint loads strictly. The MobileNetV2
+# layout matches torchvision.models.MobileNetV2 (which segmentation_models_pytorch's
+# mobilenet_v2 encoder subclasses directly); the decoder's channel/connectivity
+# bookkeeping is a direct port of smp's UnetPlusPlusDecoder. Both were verified
+# channel-for-channel against the real checkpoint's actual weight shapes. Sources:
+#   github.com/kipoju/udl4fl udl4fl/models.py (S1S2DualEncoder_MD),
+#   github.com/qubvel-org/segmentation_models.pytorch (encoders/mobilenet.py,
+#   decoders/unetplusplus/decoder.py, base/modules.py).
+
+def _conv_bn_act(in_channels, out_channels, kernel_size, stride=1, groups=1, activation=True):
+    layers = [
+        nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=kernel_size//2, groups=groups, bias=False),
+        nn.BatchNorm2d(out_channels)]
+    if activation:
+        layers.append(nn.ReLU6(inplace=True))
+    return nn.Sequential(*layers)
+
+class MobileNetV2InvertedResidual(nn.Module):
+    def __init__(self, in_channels, out_channels, stride, expand_ratio):
+        super().__init__()
+        hidden_dim = int(round(in_channels*expand_ratio))
+        self.use_res_connect = stride==1 and in_channels==out_channels
+
+        layers = []
+        if expand_ratio != 1:
+            layers.append(_conv_bn_act(in_channels, hidden_dim, 1))
+        layers.append(_conv_bn_act(hidden_dim, hidden_dim, 3, stride=stride, groups=hidden_dim))
+        layers.append(nn.Conv2d(hidden_dim, out_channels, 1, bias=False))
+        layers.append(nn.BatchNorm2d(out_channels))
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return x+self.conv(x) if self.use_res_connect else self.conv(x)
+
+# (expand_ratio, out_channels, num_blocks, stride of the first block)
+MOBILENET_V2_SETTINGS = [(1,16,1,1), (6,24,2,2), (6,32,3,2), (6,64,4,2), (6,96,3,1), (6,160,3,2), (6,320,1,1)]
+
+class MMUnetEncoder(nn.Module):
+    '''
+    Standard MobileNetV2 feature extractor (19 entries under `features`, matching
+    torchvision.models.MobileNetV2.features exactly), returning the 5-stage
+    feature pyramid segmentation_models_pytorch's mobilenet_v2 encoder returns at
+    depth=4: the raw input, then the outputs after blocks 1, 3, 6 and 13 of
+    `features` (1/2, 1/4, 1/8 and 1/16 resolution; blocks 14-18 are unused at
+    this depth and not run).
+    '''
+    out_indices = (1, 3, 6, 13)
+
+    def __init__(self, in_channels):
+        super().__init__()
+        layers = [_conv_bn_act(in_channels, 32, 3, stride=2)]
+        channels = 32
+        for expand_ratio, out_channels, num_blocks, stride in MOBILENET_V2_SETTINGS:
+            for block_idx in range(num_blocks):
+                layers.append(MobileNetV2InvertedResidual(channels, out_channels, stride if block_idx==0 else 1, expand_ratio))
+                channels = out_channels
+        layers.append(_conv_bn_act(channels, 1280, 1))
+        self.features = nn.Sequential(*layers)
+        self.out_channels = (in_channels, 16, 24, 32, 96)
+
+    def forward(self, x):
+        pyramid = [x]
+        for i, module in enumerate(self.features):
+            x = module(x)
+            if i in self.out_indices:
+                pyramid.append(x)
+            if i==self.out_indices[-1]:
+                break
+        return pyramid
+
+class MMUnetDecoderBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super().__init__()
+        self.conv1 = nn.Sequential(nn.Conv2d(in_channels+skip_channels, out_channels, 3, padding=1), nn.ReLU(inplace=True))
+        self.conv2 = nn.Sequential(nn.Conv2d(out_channels, out_channels, 3, padding=1), nn.ReLU(inplace=True))
+
+    def forward(self, x, skip=None):
+        x = nn.functional.interpolate(x, scale_factor=2, mode='nearest')
+        if skip is not None:
+            x = torch.cat([x, skip], dim=1)
+        return self.conv2(self.conv1(x))
+
+class MMUnetPlusPlusDecoder(nn.Module):
+    '''
+    Hand-port of segmentation_models_pytorch's UnetPlusPlusDecoder (dense nested
+    skip connections), verified channel-for-channel against the real checkpoint's
+    7 decoder blocks. No batchnorm/attention (matches use_batchnorm=False,
+    attention_type=None in the original training config).
+    '''
+    def __init__(self, encoder_channels, decoder_channels=(256,128,64,32)):
+        super().__init__()
+        # drop the encoder's raw-input stage (same resolution as the input) and
+        # reverse to start from the deepest (head) stage
+        encoder_channels = list(encoder_channels[1:])[::-1]
+
+        head_channels = encoder_channels[0]
+        self.in_channels = [head_channels] + list(decoder_channels[:-1])
+        self.skip_channels = list(encoder_channels[1:]) + [0]
+        self.out_channels = decoder_channels
+        self.depth = len(self.in_channels)-1
+
+        blocks = {}
+        for layer_idx in range(len(self.in_channels)-1):
+            for depth_idx in range(layer_idx+1):
+                if depth_idx==0:
+                    in_ch = self.in_channels[layer_idx]
+                    skip_ch = self.skip_channels[layer_idx]*(layer_idx+1)
+                    out_ch = self.out_channels[layer_idx]
+                else:
+                    out_ch = self.skip_channels[layer_idx]
+                    skip_ch = self.skip_channels[layer_idx]*(layer_idx+1-depth_idx)
+                    in_ch = self.skip_channels[layer_idx-1]
+                blocks[f'x_{depth_idx}_{layer_idx}'] = MMUnetDecoderBlock(in_ch, skip_ch, out_ch)
+        blocks[f'x_0_{len(self.in_channels)-1}'] = MMUnetDecoderBlock(self.in_channels[-1], 0, self.out_channels[-1])
+        self.blocks = nn.ModuleDict(blocks)
+
+    def forward(self, features):
+        # drop the encoder's raw-input stage and reverse, same as __init__
+        features = list(features[1:])[::-1]
+
+        dense_x = {}
+        for layer_idx in range(len(self.in_channels)-1):
+            for depth_idx in range(self.depth-layer_idx):
+                if layer_idx==0:
+                    dense_x[f'x_{depth_idx}_{depth_idx}'] = self.blocks[f'x_{depth_idx}_{depth_idx}'](
+                        features[depth_idx], features[depth_idx+1])
+                else:
+                    dense_l_i = depth_idx+layer_idx
+                    cat_features = [dense_x[f'x_{idx}_{dense_l_i}'] for idx in range(depth_idx+1, dense_l_i+1)]
+                    cat_features = torch.cat(cat_features+[features[dense_l_i+1]], dim=1)
+                    dense_x[f'x_{depth_idx}_{dense_l_i}'] = self.blocks[f'x_{depth_idx}_{dense_l_i}'](
+                        dense_x[f'x_{depth_idx}_{dense_l_i-1}'], cat_features)
+        return self.blocks[f'x_0_{self.depth}'](dense_x[f'x_0_{self.depth-1}'])
+
+class MMUnetS1S2(nn.Module):
+    '''
+    Matches the checkpoint layout of isp-uv-es/udl4fl_models' mm_unet_s1s2
+    (S1S2DualEncoder_MD, https://github.com/kipoju/udl4fl): two independent
+    MobileNetV2 encoders (Sentinel-1 VV/VH, Sentinel-2
+    blue/green/red/nir/swir16/swir22) feeding a shared UNet++ decoder. With
+    only one modality given (batch['input_flag'] = [1,0] or [0,1]), only that
+    modality's encoder runs -- this tool only uses it that way; the combined
+    (masked-mean fusion of both modalities) branch is ported for fidelity but
+    isn't exercised here. Outputs softmax probabilities over {0: land, 1: water}.
+    '''
+    def __init__(self, in_channels_s1:int=2, in_channels_s2:int=6, num_classes:int=2):
+        super().__init__()
+        self.encoder1 = MMUnetEncoder(in_channels_s1)
+        self.encoder2 = MMUnetEncoder(in_channels_s2)
+        self.decoder = MMUnetPlusPlusDecoder(self.encoder1.out_channels)
+        self.segmentation_head = nn.Sequential(nn.Conv2d(32, num_classes, kernel_size=3, padding=1))
+
+    def forward(self, batch):
+        if torch.all(batch['input_flag'][:,0]==0):
+            x = self.encoder2(batch['S2'])
+        elif torch.all(batch['input_flag'][:,1]==0):
+            x = self.encoder1(batch['S1'])
+        else:
+            x1, x2 = self.encoder1(batch['S1']), self.encoder2(batch['S2'])
+            mask1 = batch['input_flag'][:,0].reshape(-1,1,1,1)
+            mask2 = batch['input_flag'][:,1].reshape(-1,1,1,1)
+            x = [torch.cat((x1[0], x2[0]), dim=1)] + [
+                (mask1*x1[i+1]+mask2*x2[i+1])/(mask1+mask2) for i in range(len(x1)-1)]
+
+        out = self.decoder(x)
+        out = self.segmentation_head(out)
+        return torch.softmax(out, dim=1)
+
 if __name__=='__main__':
     # show model
     model = UNetSemanticSegmentation(in_channels=3, out_channels=2, base=16)
